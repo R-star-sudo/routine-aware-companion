@@ -127,6 +127,21 @@ implemented. The Settings CSV import accepts backend CSV fields such as
 `room_humidity_percent`, acceleration axes, `pillbox_open`, and
 `sensor_validity`.
 
+### MPU6050 Lab
+
+The **MPU6050 Lab** page is an optional, browser-local tool for live sensor
+monitoring, manual or automatic offset calibration, task-based capture, and CSV
+export. It reads the Base Station's newline-delimited unified JSON stream
+(`wearable.mpu_ok` and `wearable.ax` through `wearable.gz`) using Web Serial.
+Use a Chromium-based browser on `localhost` or HTTPS and select the Base
+Station's baud rate (115200 by default).
+
+The USB serial port is exclusive: stop the laptop collector before connecting
+from the browser, and disconnect from the lab before restarting the collector.
+Lab calibration and task datasets are kept separate from the routine telemetry
+API and are not uploaded automatically. Export captured samples before closing
+the browser tab.
+
 ## Prepare real telemetry for future model work
 
 Real hardware must first be collected to a separate raw file using
