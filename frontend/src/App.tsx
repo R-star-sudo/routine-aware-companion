@@ -11,9 +11,10 @@ import {
   Observation, parseObservationCsv, saveEvents, saveImportedObservations,
   serializeTelemetryCsv,
 } from "./data";
+import Mpu6050Lab from "./Mpu6050Lab";
 
 type PageId = "Overview" | "Predictive Calendar" | "Live Monitoring" | "Routine Analytics"
-  | "Medication Monitoring" | "Predictions & Events" | "Device Health" | "Settings";
+  | "Medication Monitoring" | "Predictions & Events" | "Device Health" | "MPU6050 Lab" | "Settings";
 
 const navigation: { label: PageId; icon: typeof Home }[] = [
   { label: "Overview", icon: Home },
@@ -23,6 +24,7 @@ const navigation: { label: PageId; icon: typeof Home }[] = [
   { label: "Medication Monitoring", icon: Pill },
   { label: "Predictions & Events", icon: Clock3 },
   { label: "Device Health", icon: ShieldCheck },
+  { label: "MPU6050 Lab", icon: Watch },
   { label: "Settings", icon: Settings2 },
 ];
 
@@ -316,24 +318,26 @@ function App() {
           <button className="icon-button mobile-menu-button" aria-label="Open navigation" onClick={() => setMobileMenu(true)}><Menu size={20} /></button>
           <div className="breadcrumb">Workspace <ChevronRight size={14} /> <strong>{page}</strong></div>
           <div className="topbar-actions">
-            <button
-              className={`button ${mode === "LIVE" ? "button-primary" : "button-secondary"}`}
-              style={{ height: "30px", fontSize: "11px", padding: "0 10px", display: "inline-flex", alignItems: "center", gap: "6px" }}
-              title="Click to toggle between Live Hardware Telemetry and Demo Mode"
-              onClick={() => void changeMode(mode === "LIVE" ? "DEMO" : "LIVE")}
-            >
-              <span className={`connection-dot ${mode === "LIVE" && liveAvailable && !sourceError ? "dot-green" : "dot-blue"}`} style={{ display: "inline-block" }} />
-              {mode === "LIVE" ? "● LIVE STREAMING" : "DEMO MODE (Click for Live)"}
-            </button>
-            <div className="connection-label">
-              <span className={`connection-dot ${mode === "LIVE" && liveAvailable && !sourceError && !loading ? "dot-green" : mode === "DEMO" ? "dot-blue" : "dot-muted"}`} />
-              {mode === "LIVE" ? (loading ? "Checking source" : sourceError || !liveAvailable ? "Unavailable" : lastUpdated ? `${data.observations.length} records · Live` : "Connected · waiting for readings") : mode === "CSV" ? "Local data" : "Demo mode"}
-            </div>
-            <span className={`mode-badge ${modeBadgeClass}`}>{dataLabel}</span>
-            <span className="topbar-divider" />
-            <span className="topbar-date">{mode === "LIVE" && lastUpdated ? "SIM · " : ""}{displayedDate.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}</span>
-            <button className="icon-button notification-button" aria-label="Notifications" onClick={() => setPage("Predictions & Events")}><Bell size={18} /><i /></button>
-            <button className="icon-button mobile-menu-button" aria-label="Refresh data" onClick={() => void refresh()}><RefreshCw size={17} /></button>
+            {page !== "MPU6050 Lab" && <>
+              <button
+                className={`button ${mode === "LIVE" ? "button-primary" : "button-secondary"}`}
+                style={{ height: "30px", fontSize: "11px", padding: "0 10px", display: "inline-flex", alignItems: "center", gap: "6px" }}
+                title="Click to toggle between Live Hardware Telemetry and Demo Mode"
+                onClick={() => void changeMode(mode === "LIVE" ? "DEMO" : "LIVE")}
+              >
+                <span className={`connection-dot ${mode === "LIVE" && liveAvailable && !sourceError ? "dot-green" : "dot-blue"}`} style={{ display: "inline-block" }} />
+                {mode === "LIVE" ? "● LIVE STREAMING" : "DEMO MODE (Click for Live)"}
+              </button>
+              <div className="connection-label">
+                <span className={`connection-dot ${mode === "LIVE" && liveAvailable && !sourceError && !loading ? "dot-green" : mode === "DEMO" ? "dot-blue" : "dot-muted"}`} />
+                {mode === "LIVE" ? (loading ? "Checking source" : sourceError || !liveAvailable ? "Unavailable" : lastUpdated ? `${data.observations.length} records · Live` : "Connected · waiting for readings") : mode === "CSV" ? "Local data" : "Demo mode"}
+              </div>
+              <span className={`mode-badge ${modeBadgeClass}`}>{dataLabel}</span>
+              <span className="topbar-divider" />
+              <span className="topbar-date">{mode === "LIVE" && lastUpdated ? "SIM · " : ""}{displayedDate.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}</span>
+              <button className="icon-button notification-button" aria-label="Notifications" onClick={() => setPage("Predictions & Events")}><Bell size={18} /><i /></button>
+              <button className="icon-button mobile-menu-button" aria-label="Refresh data" onClick={() => void refresh()}><RefreshCw size={17} /></button>
+            </>}
           </div>
         </header>
 
@@ -347,15 +351,15 @@ function App() {
                 disabled={mode === "DEMO" || data.observations.length === 0 || loading || (mode === "LIVE" && !liveAvailable)}
                 title={mode === "LIVE" ? "Download the live telemetry records currently loaded in the dashboard (up to 500)." : "Download the imported telemetry observations as CSV."}
               ><Download size={15} />Download CSV</button>
-              {page !== "Settings" && <button className="button button-secondary" onClick={() => void refresh()} disabled={loading}><RefreshCw size={15} className={loading ? "spin" : ""} />{loading ? "Syncing" : "Refresh"}</button>}
-              {page !== "Settings" && <button className="date-chip" onClick={() => setPage("Predictive Calendar")}><CalendarDays size={16} />{formatDate(selectedDate)}<ChevronRight size={14} /></button>}
+              {page !== "Settings" && page !== "MPU6050 Lab" && <button className="button button-secondary" onClick={() => void refresh()} disabled={loading}><RefreshCw size={15} className={loading ? "spin" : ""} />{loading ? "Syncing" : "Refresh"}</button>}
+              {page !== "Settings" && page !== "MPU6050 Lab" && <button className="date-chip" onClick={() => setPage("Predictive Calendar")}><CalendarDays size={16} />{formatDate(selectedDate)}<ChevronRight size={14} /></button>}
             </div>
           </div>
 
-          {mode === "DEMO" && <div className="demo-banner"><span className="demo-banner-dot" /><strong>DEMO DATA</strong><span>Illustrative sample data only — not readings from a person or connected hardware.</span><button className="button button-primary" style={{ height: "24px", fontSize: "10px", marginLeft: "auto", padding: "0 8px" }} onClick={() => void changeMode("LIVE")}>Switch to Live Telemetry →</button></div>}
-          {mode === "CSV" && <div className="csv-banner"><Upload size={15} /><strong>LOCAL CSV</strong><span>Imported observations saved in this browser. No live connection is active.</span><button onClick={() => setPage("Settings")}>Manage import <ArrowRight size={13} /></button></div>}
-          {sourceError && <div className="error-banner" role="alert"><CircleAlert size={17} /><span>{sourceError}</span><button aria-label="Dismiss error" onClick={() => setSourceError("")}><X size={16} /></button></div>}
-          {notice && <div className="notice-banner" role="status"><Check size={16} />{notice}</div>}
+          {mode === "DEMO" && page !== "MPU6050 Lab" && <div className="demo-banner"><span className="demo-banner-dot" /><strong>DEMO DATA</strong><span>Illustrative sample data only — not readings from a person or connected hardware.</span><button className="button button-primary" style={{ height: "24px", fontSize: "10px", marginLeft: "auto", padding: "0 8px" }} onClick={() => void changeMode("LIVE")}>Switch to Live Telemetry →</button></div>}
+          {mode === "CSV" && page !== "MPU6050 Lab" && <div className="csv-banner"><Upload size={15} /><strong>LOCAL CSV</strong><span>Imported observations saved in this browser. No live connection is active.</span><button onClick={() => setPage("Settings")}>Manage import <ArrowRight size={13} /></button></div>}
+          {sourceError && page !== "MPU6050 Lab" && <div className="error-banner" role="alert"><CircleAlert size={17} /><span>{sourceError}</span><button aria-label="Dismiss error" onClick={() => setSourceError("")}><X size={16} /></button></div>}
+          {notice && page !== "MPU6050 Lab" && <div className="notice-banner" role="status"><Check size={16} />{notice}</div>}
 
           {page === "Overview" && <Overview data={data} observations={observationsForDate} forecast={forecast} current={currentReading} selectedDate={selectedDate} mode={mode} onNavigate={setPage} />}
           {page === "Predictive Calendar" && <CalendarPage data={data} selectedDate={selectedDate} setSelectedDate={setSelectedDate} viewMonth={viewMonth} setViewMonth={setViewMonth} forecast={forecast} observations={observationsForDate} mode={mode} onNavigate={setPage} />}
@@ -364,6 +368,7 @@ function App() {
           {page === "Medication Monitoring" && <MedicationPage data={data} observations={observationsForDate} forecast={forecast} mode={mode} />}
           {page === "Predictions & Events" && <EventsPage events={data.events} forecasts={data.forecasts} selectedDate={selectedDate} mode={mode} onAction={recordDemoAction} actionBusy={actionBusy} />}
           {page === "Device Health" && <DeviceHealthPage mode={mode} lastUpdated={lastUpdated} loading={loading} liveAvailable={liveAvailable} />}
+          <div hidden={page !== "MPU6050 Lab"}><Mpu6050Lab active={page === "MPU6050 Lab"} /></div>
           {page === "Settings" && <SettingsPage mode={mode} onModeChange={changeMode} onImport={importCsv} onClear={() => {
             try {
               localStorage.removeItem("rac.csv-observations.v1");
@@ -374,7 +379,7 @@ function App() {
             }
             catch (error) { setSourceError(error instanceof Error ? error.message : "Could not clear local observations."); }
           }} />}
-          <footer className="footer"><span>Routine-Aware Companion <b>·</b> {mode === "DEMO" ? "Demonstration workspace" : mode === "CSV" ? "Browser-local records" : "Live telemetry API"}</span><span>Observations are not diagnoses. Pillbox interaction does not confirm medication use.</span></footer>
+          <footer className="footer"><span>{page === "MPU6050 Lab" ? "MPU6050 Lab · Separate browser serial capture" : <>Routine-Aware Companion <b>·</b> {mode === "DEMO" ? "Demonstration workspace" : mode === "CSV" ? "Browser-local records" : "Live telemetry API"}</>}</span><span>Observations are not diagnoses. Pillbox interaction does not confirm medication use.</span></footer>
         </div>
       </main>
     </div>
@@ -390,6 +395,7 @@ function pageDescription(page: PageId) {
     "Medication Monitoring": "Track pillbox interactions and related forecast outcomes.",
     "Predictions & Events": "Review what was forecast, observed, and explicitly actioned.",
     "Device Health": "Check the reported status of each system component.",
+    "MPU6050 Lab": "Calibrate the motion sensor and collect task-labeled raw readings.",
     Settings: "Choose a data source and manage local observation imports.",
   };
   return descriptions[page];
@@ -752,9 +758,9 @@ function DeviceHealthPage({ mode, lastUpdated, loading, liveAvailable }: { mode:
   const states = [
     { group: "WEARABLE", items: [["ESP32 telemetry", mode === "DEMO" ? "Demo data" : "Unavailable"], ["MAX30102 signal", mode === "DEMO" ? "Demo data" : "Unavailable"], ["DS18B20 sensor", mode === "DEMO" ? "Demo data" : "Unavailable"], ["MPU6050 movement", mode === "DEMO" ? "Demo data" : "Unavailable"]] },
     { group: "BASE STATION", items: [["ESP-NOW link", mode === "DEMO" ? "Demo data" : "Unavailable"], ["DHT11 environment", mode === "DEMO" ? "Demo data" : "Unavailable"], ["Pillbox sensor", mode === "DEMO" ? "Demo data" : "Unavailable"], ["LED / voice outputs", "Not connected"]] },
-    { group: "LAPTOP & PREDICTION", items: [["Data source", sourceStatus], ["USB Serial", "Not accessed by browser"], ["CSV logging", mode === "CSV" ? "Browser-local import" : "Not connected"], ["Prediction model", "Model not available"]] },
+    { group: "LAPTOP & PREDICTION", items: [["Data source", sourceStatus], ["USB Serial", "Status shown in MPU6050 Lab"], ["CSV logging", mode === "CSV" ? "Browser-local import" : "Not connected"], ["Prediction model", "Model not available"]] },
   ];
-  return <><div className="health-summary"><div className={`health-summary-icon ${mode === "LIVE" && !lastUpdated ? "health-offline" : "health-demo"}`}>{mode === "LIVE" && !lastUpdated ? <CloudOff size={23} /> : <ShieldCheck size={23} />}</div><div><span>SYSTEM SOURCE STATUS</span><strong>{sourceStatus}</strong><small>{lastUpdated ? `Latest record ${formatDate(dateKey(lastUpdated))} at ${formatTime(lastUpdated)}` : mode === "DEMO" ? "Green device connectivity is not claimed by this dashboard." : "No verified hardware status has been reported."}</small></div></div><div className="health-grid">{states.map((group) => <Panel key={group.group} title={group.group} subtitle="Status reported by the current frontend data source">{group.items.map(([label, value]) => <div className="health-row" key={label}><span>{label}</span><strong className={value === "Unavailable" || value === "Not connected" ? "health-value-muted" : ""}><i className={`health-dot ${value === "Demo data" ? "health-dot-demo" : value === "Unavailable" || value === "Not connected" || value === "Model not available" ? "health-dot-muted" : "health-dot-neutral"}`} />{value}</strong></div>)}</Panel>)}</div><div className="calendar-note"><CircleAlert size={16} /><span>The browser does not open the ESP32 serial port. Live status needs the laptop receiver and dashboard API to report verified values.</span></div></>;
+  return <><div className="health-summary"><div className={`health-summary-icon ${mode === "LIVE" && !lastUpdated ? "health-offline" : "health-demo"}`}>{mode === "LIVE" && !lastUpdated ? <CloudOff size={23} /> : <ShieldCheck size={23} />}</div><div><span>SYSTEM SOURCE STATUS</span><strong>{sourceStatus}</strong><small>{lastUpdated ? `Latest record ${formatDate(dateKey(lastUpdated))} at ${formatTime(lastUpdated)}` : mode === "DEMO" ? "Green device connectivity is not claimed by this dashboard." : "No verified hardware status has been reported."}</small></div></div><div className="health-grid">{states.map((group) => <Panel key={group.group} title={group.group} subtitle="Status reported by the current frontend data source">{group.items.map(([label, value]) => <div className="health-row" key={label}><span>{label}</span><strong className={value === "Unavailable" || value === "Not connected" || label === "USB Serial" ? "health-value-muted" : ""}><i className={`health-dot ${value === "Demo data" ? "health-dot-demo" : value === "Unavailable" || value === "Not connected" || value === "Model not available" || label === "USB Serial" ? "health-dot-muted" : "health-dot-neutral"}`} />{value}</strong></div>)}</Panel>)}</div><div className="calendar-note"><CircleAlert size={16} /><span>The routine dashboard receives data through the laptop collector and API. The optional MPU6050 Lab page reads USB serial directly, so stop the collector before using the lab; the port cannot be shared.</span></div></>;
 }
 
 function SettingsPage({ mode, onModeChange, onImport, onClear }: { mode: DataMode; onModeChange: (mode: DataMode) => void; onImport: (event: ChangeEvent<HTMLInputElement>) => void; onClear: () => void }) {
