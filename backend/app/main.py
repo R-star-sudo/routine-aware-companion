@@ -3,12 +3,15 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from app.services.voice_service import generate_speech, validate_speech_text
 
 from app.schemas.telemetry import TelemetryRecord
 from app.services.telemetry_storage import TelemetryStorageError, TelemetryStore
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 logger = logging.getLogger(__name__)
 
