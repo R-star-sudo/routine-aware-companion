@@ -16,8 +16,13 @@ import joblib
 import numpy as np
 from sklearn.metrics import (
     average_precision_score,
+    brier_score_loss,
     confusion_matrix,
 )
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
 
 from app.dataset_generator import LABEL_COLUMNS
@@ -70,6 +75,26 @@ DEFAULT_OUTPUT_DIR = (
     Path(__file__).resolve().parents[1] / "data" / "model_evaluation"
 )
 MODEL_FACTORY = Callable[[int], Pipeline]
+MODEL_VERSION = "routine-baselines-v1"
+
+
+def build_logistic_regression(random_state: int) -> Pipeline:
+    return Pipeline([("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
+                     ("scale", StandardScaler()),
+                     ("classifier", LogisticRegression(class_weight="balanced", max_iter=1000, random_state=random_state))])
+
+
+def build_random_forest(random_state: int) -> Pipeline:
+    return Pipeline([("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
+                     ("classifier", RandomForestClassifier(n_estimators=200, max_depth=8, min_samples_leaf=10,
+                                                           class_weight="balanced_subsample", random_state=random_state, n_jobs=1))])
+
+
+MODEL_FACTORIES: dict[str, MODEL_FACTORY] = {
+    "decision_tree": build_decision_tree,
+    "logistic_regression": build_logistic_regression,
+    "random_forest": build_random_forest,
+}
 
 
 class DatasetValidationError(ValueError):
@@ -400,12 +425,33 @@ def _calculate_metrics(
     if not actual_negative:
         reasons.append("specificity is undefined because there are no actual negatives")
 
+    calibration_bins = []
+    expected_calibration_error = None
+    if len(actual_values):
+        total = len(actual_values)
+        errors = []
+        for index in range(10):
+            lower = index / 10
+            upper = (index + 1) / 10
+            mask = (scores >= lower) & ((scores < upper) if index < 9 else (scores <= upper))
+            if np.any(mask):
+                observed_rate = float(np.mean(actual_values[mask]))
+                mean_score = float(np.mean(scores[mask]))
+                count = int(np.sum(mask))
+                calibration_bins.append({"lower": lower, "upper": upper, "count": count,
+                                         "mean_probability": mean_score, "observed_rate": observed_rate})
+                errors.append(count / total * abs(mean_score - observed_rate))
+        expected_calibration_error = float(sum(errors))
+
     return {
         "precision": precision,
         "recall": recall,
         "f1": f1,
         "confusion_matrix": matrix.tolist(),
         "average_precision": average_precision,
+        "brier_score": float(brier_score_loss(actual_values, scores)) if len(actual_values) else None,
+        "expected_calibration_error_10_bins": expected_calibration_error,
+        "calibration_bins_10": calibration_bins,
         "undefined_metric_notes": reasons,
     }
 
@@ -490,18 +536,44 @@ def _evaluate_target(
             "Test partition contains only one class; average precision is unavailable."
         )
 
-    model = model_factory(seed)
-    model.fit(dataset.features[train_target_indices], y_train)
-    predictions = model.predict(dataset.features[test_target_indices]).astype(int)
-    scores = model.predict_proba(dataset.features[test_target_indices])[:, 1]
-    result["decision_tree"] = {
-        "model": describe_decision_tree(),
-        "metrics": _calculate_metrics(y_test, predictions, scores),
-    }
-    if output_dir is not None:
-        models_dir = output_dir / "models"
+    factories = MODEL_FACTORIES if model_factory is build_decision_tree else {"decision_tree": model_factory}
+    models_dir = output_dir / "models" if output_dir is not None else None
+    if models_dir is not None:
         models_dir.mkdir(parents=True, exist_ok=True)
-        joblib.dump(model, models_dir / f"{label}.joblib")
+    for model_name, factory in factories.items():
+        model = factory(seed)
+        model.fit(dataset.features[train_target_indices], y_train)
+        validation_y = labels[validation_target_indices].astype(int)
+        if len(validation_target_indices):
+            validation_scores = model.predict_proba(dataset.features[validation_target_indices])[:, 1]
+            validation_predictions = (validation_scores >= 0.5).astype(int)
+            validation_metrics = _calculate_metrics(validation_y, validation_predictions, validation_scores)
+        else:
+            validation_metrics = None
+        predictions = model.predict(dataset.features[test_target_indices]).astype(int)
+        scores = model.predict_proba(dataset.features[test_target_indices])[:, 1]
+        metrics = _calculate_metrics(y_test, predictions, scores)
+        metrics["false_positives_per_day"] = metrics["confusion_matrix"][0][1] / max(
+            1, len({dataset.groups[index] for index in test_target_indices})
+        )
+        result[model_name] = {
+            "model": describe_decision_tree() if model_name == "decision_tree" else model_name,
+            "validation_metrics": validation_metrics,
+            "metrics": metrics,
+        }
+        if models_dir is not None:
+            # The envelope makes the feature and target contract inspectable alongside the estimator.
+            definition = {
+                "label_unusual_wake_within_60m": "An unusual wake event in the next 60 minutes.",
+                "label_delayed_medication_access_within_30m": "Delayed pillbox access event in the next 30 minutes; not proof medication was missed.",
+                "label_room_temp_out_of_range_within_30m": "Room temperature outside configured synthetic range in the next 30 minutes.",
+            }[label]
+            artifact_name = f"{label}.joblib" if model_name == "decision_tree" else f"{label}.{model_name}.joblib"
+            joblib.dump({"artifact_version": MODEL_VERSION, "target": label,
+                         "feature_names": list(dataset.feature_columns), "target_definition": definition,
+                         "dataset_mode": "synthetic-only" if dataset.provenance == {} else "prepared-real",
+                         "estimator": model}, models_dir / artifact_name)
+    result["decision_tree"] = result.get("decision_tree")
     return result
 
 
@@ -520,6 +592,7 @@ def evaluate_dataset(
         dataset, test_fraction, validation_fraction
     )
     results: dict[str, Any] = {
+        "model_version": MODEL_VERSION,
         "dataset": str(dataset_path),
         "dataset_mode": dataset_mode,
         "seed": seed,
@@ -620,11 +693,17 @@ def render_report(results: dict[str, Any]) -> str:
                 f"class at 0.5 threshold): "
                 f"`{json.dumps(baseline['metrics'], allow_nan=False)}`"
             )
-        tree = result.get("decision_tree")
-        if tree:
-            lines.append(
-                f"- Decision tree: `{json.dumps(tree['metrics'], allow_nan=False)}`"
-            )
+        for model_name in MODEL_FACTORIES:
+            model_result = result.get(model_name)
+            if model_result:
+                lines.append(
+                    f"- {model_name.replace('_', ' ').title()} validation metrics: "
+                    f"`{json.dumps(model_result.get('validation_metrics'), allow_nan=False)}`"
+                )
+                lines.append(
+                    f"- {model_name.replace('_', ' ').title()} held-out test metrics: "
+                    f"`{json.dumps(model_result['metrics'], allow_nan=False)}`"
+                )
         for limitation in result["limitations"]:
             lines.append(f"- Limitation: {limitation}")
         lines.append("")

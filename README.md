@@ -1,40 +1,31 @@
 # Routine-Aware Companion
 
-<<<<<<< HEAD
-Routine-Aware Companion is a Hacktivate 2026 prototype for predictive
-assistive systems for elderly people. The first software milestone provides a
-simulated telemetry-to-CSV pipeline and an API/collector boundary for future
-hardware data.
-=======
-An assistive system in planning for elderly people that will learn individual daily routines and provide proactive reminders and caregiver alerts.
->>>>>>> 913503692b1d26c6fb28516d01a236cbd1b3f411
+Hackathon prototype for a routine-aware companion for older adults. This is
+not a medical device. A pillbox opening is an interaction observation and does
+not establish that medicine was taken. Skin temperature is not core body
+temperature.
 
-## Current status
+## Current software status
 
-<<<<<<< HEAD
-**Implemented:** a versioned telemetry contract, synthetic NDJSON generator,
-FastAPI ingestion/latest/history endpoints, CSV persistence, and a collector
-that reads NDJSON from standard input or an optional serial port. Separate
-tools generate synthetic routine histories and prepare raw hardware telemetry
-with schedules and annotations into a provenance-marked training dataset. The
-offline evaluator remains synthetic by default and requires explicit
-`--dataset-mode prepared-real` for prepared hardware data.
+Implemented and locally testable: versioned telemetry validation, a FastAPI
+service with CSV storage, stdin/serial NDJSON collector, telemetry simulator,
+synthetic routine dataset generator, chronological offline model evaluation,
+saved synthetic scoring artifacts, a feature-validated experimental scoring
+API, conservative reminder policy, React dashboard, CSV import, and optional
+ElevenLabs MP3 generation/playback through the browser.
 
-**Planned:** base-station ESP-NOW reception and JSON serial output, dashboard,
-verified real hardware collection and real-data model evaluation, and embedded
-inference. The existing wearable firmware only acquires sensor data and prints
-diagnostic serial output. Local predictions and essential hardware actions are
-intended to remain on the base station; the laptop pipeline is for logging,
-visualization, simulation, training, and evaluation only.
-
-See [docs/architecture.md](docs/architecture.md) for architecture and the
-telemetry field definitions. See
-[docs/real_data_collection.md](docs/real_data_collection.md) for the documented
-hardware data-collection workflow and ground-truth requirements.
+Autonomous model reminders are disabled for all three targets. Synthetic held
+out evaluation produced low precision, and synthetic performance is not
+evidence of real-world accuracy. The scoring endpoint is for an explicitly
+labelled engineering demonstration using caller-supplied approved features; it
+does not derive schedule or history features from live telemetry. Voice is
+optional and works only when backend credentials are configured. Physical
+hardware-to-laptop integration has not been verified. Firmware source exists,
+but it is not established that deployed devices match the laptop contract.
 
 ## Backend setup
 
-Run these commands in Windows PowerShell from the repository root:
+From the repository root in PowerShell:
 
 ```powershell
 cd backend
@@ -43,195 +34,139 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-Start the API (keep it running in its terminal):
+Optional voice setup: copy `backend/.env.example` to `backend/.env` and set
+`ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, and optionally
+`ELEVENLABS_MODEL_ID`. Keep `.env` private. Start the API in the backend
+directory:
 
 ```powershell
 uvicorn app.main:app --reload
 ```
 
-The API writes to `backend/data/telemetry.csv` by default, creating the
-directory when needed. Override the location before starting the API with
-`$env:TELEMETRY_CSV_PATH = "C:\path\to\telemetry.csv"`.
+The local service has no authentication or rate limiting. Keep it on localhost;
+do not expose it publicly. The voice endpoint needs access controls before any
+public deployment. Telemetry persists to `backend/data/telemetry.csv` by
+default; `TELEMETRY_CSV_PATH` can select another location.
 
-## Simulate and collect
+## Frontend setup
 
-In a second PowerShell terminal, from the `backend` directory, pipe a
-simulated newline-delimited JSON stream through the same collector interface
-used for serial input:
+In a second terminal from the repository root:
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
+cd frontend
+npm ci
+npm run dev
+```
+
+The dashboard defaults to demo data. Select LIVE to read telemetry from
+`http://127.0.0.1:8000`; set `VITE_API_BASE_URL` at frontend build/dev time to
+use another local API origin. Browser audio may require pressing Play after
+generation. Audio is played by the browser device, not an ESP32 speaker.
+
+## Telemetry simulation and collection
+
+From `backend` with its virtual environment active:
+
+```powershell
 python -m app.simulator --count 20 --interval 0.5 | python -m app.collector
 ```
 
-Use the collector with a future base-station USB serial JSON stream:
+The collector accepts stdin NDJSON or a serial port (`--serial-port COM3
+--baudrate 115200`) and posts records to the local API. Serial integration
+requires the base station to emit newline-delimited JSON matching schema 1.0;
+that device path has not been physically verified.
+
+## Dataset, evaluation and model artifacts
+
+Synthetic routine histories can be generated without hardware:
 
 ```powershell
-python -m app.collector --serial-port COM3 --baudrate 115200
-```
-
-The serial mode requires newline-delimited JSON from the base station. Current
-wearable firmware does not yet produce that format. Collector validation
-errors and API failures are reported to standard error.
-
-## Prepare real telemetry for future model work
-
-Real hardware must first be collected to a separate raw file using
-`TELEMETRY_CSV_PATH`, then accompanied by the daily schedule and independent
-event-annotation CSVs described in
-[docs/real_data_collection.md](docs/real_data_collection.md). From `backend`,
-prepare a new, not-yet-existing output file without overwriting raw telemetry
-or prior prepared data:
-
-```powershell
-.\.venv\Scripts\python.exe -m app.real_data_preparation --telemetry data\hardware_telemetry.csv --schedules data\real_context\routine_schedules.csv --annotations data\real_context\event_annotations.csv --output data\prepared_real\training.csv --max-gap-seconds 600
-```
-
-The annotation file is optional; without it, waking labels remain unavailable.
-Preparation validates raw records and adds profile-day identity, causal model
-features, future-event labels, quality flags, and input-hash provenance. The
-prepared-real evaluator mode is explicit and never selected by default:
-
-```powershell
-.\.venv\Scripts\python.exe -m app.model_evaluation --input data\prepared_real\training.csv --output-dir data\model_evaluation\prepared_real --dataset-mode prepared-real --seed 42 --validation-fraction 0.2 --test-fraction 0.2
-```
-
-The second command is documented for a future dataset only; it has **not**
-been run on real records. Base-station serial output and real data collection
-are not yet verified. See the collection guide for schedule/annotation
-formats, target requirements, missing-data behavior, privacy, and limitations.
-
-## Generate a synthetic routine dataset
-
-The dataset generator is separate from the live telemetry simulator. It
-creates multi-day, multi-profile histories with future-window labels, without
-starting the API or requiring hardware:
-
-```powershell
-Set-Location backend
-.\.venv\Scripts\Activate.ps1
 python -m app.dataset_generator --days 14 --interval-minutes 5 --seed 20261014 --scenario-rate 0.15 --start-date 2026-01-01 --timezone UTC --output data\synthetic_datasets\routine_dataset.csv
 ```
 
-Defaults are 14 days, a five-minute interval, seed `20261014`, scenario rate
-`0.15`, start date `2026-01-01`, timezone `UTC`, and
-`data\synthetic_datasets\routine_dataset.csv`. Use exactly one of
-`--interval-minutes` or `--interval-seconds`; the interval must divide evenly
-into 24 hours and cannot exceed 60 minutes. Scenario rate is a probability
-from 0 through 1 applied independently to each profile-day for each synthetic
-scenario. The timezone accepts `UTC` or a fixed offset such as `+05:30`;
-daylight-saving rules are not modeled. Generated training data is ignored by
-Git under `backend/data/synthetic_datasets/`.
-
-The generator uses three fixed synthetic profiles with expected wake times of
-06:30, 07:00, and 07:30 local time. The row count is
-`days × 3 profiles × (86,400 / interval_seconds)`.
-
-The CSV groups columns by prefix: identity and existing version-1 telemetry
-measurements/validity flags; `feature_*` inputs computed from current or past
-observations; `label_*` future targets; and `metadata_*` scenario-audit fields.
-Do not use labels or audit metadata as model features. Labels are:
-
-- `label_unusual_wake_within_60m`: an unusually early waking event starts in
-  the next 60 minutes, at least 30 minutes before the profile baseline.
-- `label_delayed_medication_access_within_30m`: the expected pillbox-access
-  schedule is in the next 30 minutes and access is delayed by more than the
-  15-minute grace period or absent. This is access only, not proof of
-  medication ingestion.
-- `label_room_temp_out_of_range_within_30m`: simulated room temperature first
-  crosses outside the configurable comfort range in the next 30 minutes
-  (defaults: 18–26 °C).
-
-Labels are `0`, `1`, or blank in the final hour of each profile-day sequence,
-where the full 60-minute maximum horizon is unavailable. Generation reports
-positive, negative, and unavailable counts for each label. Synthetic values support engineering and
-initial pipeline evaluation only; they do not establish real-world predictive
-accuracy or medical conclusions. Future evaluation should split by complete
-profile-day sequences, not randomly split neighboring rows.
-
-## Train and evaluate baseline models
-
-After generating the synthetic dataset, run the offline evaluator from
-`backend`:
+Evaluate the baseline and write reports/artifacts:
 
 ```powershell
-python -m app.model_evaluation --input data\synthetic_datasets\routine_dataset.csv --output-dir data\model_evaluation --seed 42 --validation-fraction 0.2 --test-fraction 0.2
+python -m app.model_evaluation --input data\synthetic_datasets\routine_dataset.csv --output-dir data\model_comparison_run1 --seed 42 --validation-fraction 0.2 --test-fraction 0.2
 ```
 
-The evaluator trains one shallow decision tree per existing future-event
-label. Its explicit predictor allowlist is:
-`feature_hour_sin`, `feature_hour_cos`,
-`feature_expected_wake_hour_local`,
-`feature_minutes_from_expected_wake`,
-`feature_motion_intensity_m_s2`,
-`feature_recent_motion_mean_30m_m_s2`, and
-`feature_minutes_since_pillbox_open`. Labels, metadata, raw identifiers,
-telemetry measurements, and future observations are not predictors. Missing
-allowed feature values are median-imputed by a preprocessing pipeline fit on
-training rows only. Prepared-real mode uses this existing allowlist plus the
-causal `feature_room_temperature_c`, derived from the current validated room
-reading; this change does not alter the synthetic feature contract.
+The evaluator compares the decision tree with fixed logistic-regression and
+random-forest baselines. It reports validation and held-out test precision,
+recall, F1, confusion matrix, average precision, Brier score, and false
+positives per held-out profile-day. Imputation/scaling are fitted only on
+training rows. It writes versioned joblib envelopes containing target meaning,
+feature names/order, data mode and estimator. For a fresh run that preserves
+existing artifacts, choose a new output folder, for example
+`data\model_comparison_run1`. Synthetic evaluation remains pipeline evidence
+only, not real-world accuracy or grounds to enable reminders. ML reminder
+targets are explicitly false by default in `app.services.reminder_policy`.
 
-The split is chronological within each profile: latest complete profile-day
-sequences are held out for testing; the immediately preceding complete
-sequences are validation; and earlier complete sequences are training. By
-default, validation and test are each 20% of each profile's days. Complete
-sequences never cross partitions. The current baseline model is fit only on
-training rows; validation is reserved for future model selection and is not
-used to tune this baseline. Results on identical test rows compare precision,
-recall, F1, confusion matrix, and average precision (when both test classes
-are present) against a baseline that predicts the training majority class
-using a 0.5 prevalence threshold. Average precision is computed with
-`sklearn.metrics.average_precision_score`, not trapezoidal PR-curve area.
-Per-target train/validation/test class counts and limitations are reported.
-Undefined precision, recall, or F1 is reported as null, not zero, when its
-denominator is empty.
-Artifacts are written to `data\model_evaluation\evaluation.json`,
-`data\model_evaluation\report.md`, and `data\model_evaluation\models\`.
+`POST /api/v1/routines/baseline` accepts a timezone and explicitly observed
+per-day wake times, optional sleep-onset times, and optional activity summaries
+by local hour. It does not infer sleep from movement; unsupported sleep-duration
+and activity summaries are returned unavailable. Data is processed statelessly
+and is not persisted by this route.
 
-These results are based on synthetic data and **do not establish real-world
-accuracy**. Synthetic patterns may be simpler than real routines, sensors, and
-missingness. Evaluation on representative real data and eventual validation
-on the base-station target are still required. This laptop pipeline does not
-move final predictive decisions or hardware actions off the base station.
+The checked-in code also includes a validation-only candidate-selection
+experiment in `app.model_selection_experiment`; generated datasets, models,
+and reports remain in ignored `backend/data/`. The selected model files used
+by `/api/v1/predictions` are under
+`data/model_evaluation/experiments/validation_selection_20261014/models/`.
+The feature allowlist is the seven `feature_*` fields listed in the report;
+labels, metadata, identifiers, and future data are excluded. Splits keep whole
+profile-days together and use earlier days for training, then validation, then
+test. Validation selects model configuration and threshold; the held-out test
+set is not used for selection.
 
-## API endpoints
+Do not use generated values as if they came from a real person. See
+`backend/data/model_evaluation/report.md` and
+`backend/data/model_evaluation/experiments/validation_selection_20261014/report.md`
+for local measured results. They are engineering results on synthetic data,
+not real-world or clinical evidence.
 
-- `GET /` — project welcome message.
-- `GET /health` — API health.
-- `POST /api/v1/telemetry` — validate and append a telemetry record.
-- `GET /api/v1/telemetry/latest` — retrieve the newest record (404 when empty).
-- `GET /api/v1/telemetry/history?limit=100` — retrieve newest records first;
-  limit must be from 1 to 500.
+## API routes
+
+- `GET /health` — local API health.
+- `POST /api/v1/telemetry` — validate and append one telemetry record.
+- `GET /api/v1/telemetry/latest` and `/api/v1/telemetry/history?limit=100` — stored records.
+- `POST /api/v1/predictions` — score a selected target using all seven approved, precomputed features. Returns probability, model identity, missingness, and an explicit synthetic-only flag. Models do not autonomously trigger reminders.
+- `POST /api/v1/features/prepare` — prepare those seven causal features from up to 500 telemetry observations plus an explicit timezone (`UTC` or a fixed offset such as `+05:30`) and expected wake time; returns unavailable features and suppresses scoring if any input, recent history, or schedule context is missing, invalid, or stale. It never computes future labels.
+- `POST /api/v1/routines/baseline` — calculate conservative personal routine summaries from explicit observation history; sleep duration requires explicit sleep-onset and wake annotations.
+- `POST /api/v1/reminders/evaluate` — evaluate a prediction against freshness, input-quality, enablement, and cooldown policy. All target enablement defaults to off.
+- `POST /api/v1/demo/scenarios` — run the named scripted schedule-check-in rule through the same policy and cooldown service. This is an explicit simulation, not sensor data or a model result.
+- `GET /api/v1/reminders/events` — retrieve recent policy decisions and speech-delivery states. The prototype event history is in memory and resets when the backend restarts.
+- `POST /api/v1/voice/speech` — optional server-side ElevenLabs MP3. Pass an eligible reminder's `event_id` to associate speech generation and track browser playback. API keys stay on the backend.
+- `POST /api/v1/reminders/events/{event_id}/delivery` — record browser playback states after audio generation.
 
 ## Tests
 
-From the `backend` directory with the virtual environment activated:
+From the backend directory:
 
 ```powershell
 python -m pytest
 ```
 
-Tests use temporary CSV paths and do not require physical hardware.
-=======
-The project is being developed in modular phases. **Hardware firmware for both ESP32 nodes is now implemented:**
+Tests use temporary storage and mocked voice-provider responses. No physical
+hardware or paid provider request is needed.
 
-- **Wearable Firmware (`firmware/wearable/`)**: ESP32 firmware collecting 6-axis IMU (MPU6050), pulse oximetry / heart rate (MAX30102), and peripheral skin temperature (DS18B20). Features live sensor health and staleness tracking, broadcasting validated, packed telemetry packets via ESP-NOW at 10 Hz (100ms interval) on Wi-Fi Channel 1.
-- **Base Station Firmware (`firmware/base_station/`)**: ESP32 firmware receiving ESP-NOW telemetry via a FreeRTOS queue, detecting sequence gaps and node reboots, reading local ambient conditions (DHT11) and pillbox state (Hall effect sensor), and outputting unified JSON telemetry over USB Serial (115200 baud).
+## Hardware status
 
-The laptop serial ingestion pipeline, backend service, database integration, frontend dashboard, and predictive routine services are planned for subsequent steps.
+Wearable and base-station firmware sources and PlatformIO manifests are
+present. Source inspection is not a hardware test. The wearable writes
+diagnostic serial output. The base station emits startup/status log lines and
+a nested record shaped as `{"src":"unified","wearable":{...},"base":{...},"rf":{...}}`,
+which does not match the collector's flat version-1 `TelemetryRecord` contract.
+The collector includes a small adapter for this exact nested shape. It filters
+firmware log lines and validates mapped measurements. Because firmware supplies
+uptime instead of UTC and no configured stable device ID, adapter mode requires
+operator-supplied values, for example:
 
-See [docs/architecture.md](docs/architecture.md) for full component boundaries, data protocols, and architectural status.
-
-## Firmware Setup & Build
-
-Both firmware projects are managed with PlatformIO and pinned to `espressif32@6.5.0` (Arduino-ESP32 2.0.14) for stable ESP-NOW API support:
-
-```bash
-# Build Wearable firmware
-pio run -d firmware/wearable
-
-# Build Base Station firmware
-pio run -d firmware/base_station
+```powershell
+python -m app.collector --serial-port COM3 --firmware-base-station --device-id station-a --boot-time-utc "2026-10-14T07:00:00Z"
 ```
->>>>>>> 913503692b1d26c6fb28516d01a236cbd1b3f411
+
+Run that command from `backend`. The boot-time value must truly correspond to
+the wearable's uptime zero and be updated after each wearable restart; the
+adapter does not handle 32-bit uptime rollover. Fixture mapping and null
+handling are tested; this command was not tested on a physical device. The
+reliable fallback is simulator → API → dashboard.

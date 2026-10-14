@@ -176,6 +176,30 @@ def test_missing_features_are_imputed_and_artifacts_are_written(tmp_path: Path) 
     for result in results["labels"].values():
         assert result["decision_tree"] is not None
         assert result["decision_tree"]["metrics"]["confusion_matrix"]
+        assert result["logistic_regression"]["metrics"]["brier_score"] is not None
+        assert result["random_forest"]["metrics"]["false_positives_per_day"] >= 0
+        assert result["decision_tree"]["validation_metrics"]
+    import joblib
+    artifact = joblib.load(output_dir / "models" / "label_unusual_wake_within_60m.joblib")
+    assert artifact["feature_names"] == list(FEATURE_ALLOWLIST)
+    assert artifact["target"] == "label_unusual_wake_within_60m"
+    assert artifact["artifact_version"]
+
+
+def test_versioned_artifact_contract_mismatch_is_rejected(monkeypatch, tmp_path: Path) -> None:
+    import joblib
+    import app.services.inference_service as inference
+
+    target = "label_unusual_wake_within_60m"
+    joblib.dump({"artifact_version": "old", "target": target,
+                 "feature_names": list(FEATURE_ALLOWLIST), "estimator": object()}, tmp_path / f"{target}.joblib")
+    monkeypatch.setattr(inference, "ARTIFACT_DIR", tmp_path)
+    inference._load_model.cache_clear()
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as error:
+        inference._load_model(target)
+    assert error.value.status_code == 503
+    inference._load_model.cache_clear()
 
 
 def test_prevalence_baseline_handles_imbalanced_training_data() -> None:
