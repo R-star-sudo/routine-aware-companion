@@ -92,6 +92,11 @@ function App() {
     try {
       const liveData = await loadLiveData();
       setData(liveData);
+      const newest = liveData.observations.at(-1);
+      if (newest) {
+        setSelectedDate(dateKey(newest.timestamp));
+        setViewMonth(new Date(newest.timestamp));
+      }
       setLiveAvailable(true);
     } catch (error) {
       setData({ observations: [], forecasts: [], events: [] });
@@ -109,7 +114,13 @@ function App() {
       setLiveAvailable(false);
       setSourceError("");
       try {
-        setData(await loadLiveData());
+        const liveData = await loadLiveData();
+        setData(liveData);
+        const newest = liveData.observations.at(-1);
+        if (newest) {
+          setSelectedDate(dateKey(newest.timestamp));
+          setViewMonth(new Date(newest.timestamp));
+        }
         setLiveAvailable(true);
       } catch (error) {
         setData({ observations: [], forecasts: [], events: [] });
@@ -146,7 +157,7 @@ function App() {
     : mode === "CSV" ? "LOCAL CSV" : mode;
   const modeBadgeClass = dataLabel === "OFFLINE" ? "mode-offline" : dataLabel === "CONNECTING" ? "mode-connecting" : `mode-${mode.toLowerCase()}`;
   const lastUpdated = data.observations.at(-1)?.timestamp;
-  const staleLiveData = mode === "LIVE" && Boolean(lastUpdated) && now.getTime() - Date.parse(lastUpdated!) > 5 * 60_000;
+  const displayedDate = mode === "LIVE" && lastUpdated ? new Date(lastUpdated) : now;
 
   const recordDemoAction = async (type: "LED reminder command" | "Voice prompt command") => {
     if (mode !== "DEMO" || actionBusy) return;
@@ -232,10 +243,10 @@ function App() {
           <button className="icon-button mobile-menu-button" aria-label="Open navigation" onClick={() => setMobileMenu(true)}><Menu size={20} /></button>
           <div className="breadcrumb">Workspace <ChevronRight size={14} /> <strong>{page}</strong></div>
           <div className="topbar-actions">
-            <div className="connection-label"><span className={`connection-dot ${mode === "LIVE" && liveAvailable && !sourceError && !loading && !staleLiveData ? "dot-green" : mode === "DEMO" ? "dot-blue" : "dot-muted"}`} />{mode === "LIVE" ? (loading ? "Checking source" : sourceError || !liveAvailable ? "Unavailable" : staleLiveData ? "Stale data" : lastUpdated ? "Live source" : "Connected · no readings") : mode === "CSV" ? "Local data" : "Demo mode"}</div>
+            <div className="connection-label"><span className={`connection-dot ${mode === "LIVE" && liveAvailable && !sourceError && !loading ? "dot-green" : mode === "DEMO" ? "dot-blue" : "dot-muted"}`} />{mode === "LIVE" ? (loading ? "Checking source" : sourceError || !liveAvailable ? "Unavailable" : lastUpdated ? "Live source" : "Connected · no readings") : mode === "CSV" ? "Local data" : "Demo mode"}</div>
             <span className={`mode-badge ${modeBadgeClass}`}>{dataLabel}</span>
             <span className="topbar-divider" />
-            <span className="topbar-date">{now.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}</span>
+            <span className="topbar-date">{mode === "LIVE" && lastUpdated ? "SIM · " : ""}{displayedDate.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}</span>
             <button className="icon-button notification-button" aria-label="Notifications" onClick={() => setPage("Predictions & Events")}><Bell size={18} /><i /></button>
             <button className="icon-button mobile-menu-button" aria-label="Refresh data" onClick={() => void refresh()}><RefreshCw size={17} /></button>
           </div>
@@ -272,7 +283,7 @@ function App() {
             }
             catch (error) { setSourceError(error instanceof Error ? error.message : "Could not clear local observations."); }
           }} />}
-          <footer className="footer"><span>Routine-Aware Companion <b>·</b> {mode === "DEMO" ? "Demonstration workspace" : mode === "CSV" ? "Browser-local records" : "Live integration point"}</span><span>Observations are not diagnoses. Pillbox interaction does not confirm medication use.</span></footer>
+          <footer className="footer"><span>Routine-Aware Companion <b>·</b> {mode === "DEMO" ? "Demonstration workspace" : mode === "CSV" ? "Browser-local records" : "Live telemetry API"}</span><span>Observations are not diagnoses. Pillbox interaction does not confirm medication use.</span></footer>
         </div>
       </main>
     </div>
@@ -369,7 +380,7 @@ function Overview({ data, observations, forecast, current, selectedDate, mode, o
     <div className="overview-grid overview-content-grid">
       <Panel title="Movement & heart rate" subtitle={`Observation trend · ${formatDate(selectedDate)}`} action={<button className="text-button" onClick={() => onNavigate("Live Monitoring")}>View details <ArrowRight size={14} /></button>}>
         {observations.length ? <LineChart observations={observations} primary="movement" secondary="heartRate" height={220} /> : <EmptyState title="No observations for this date" detail="Choose a date with available records or import a CSV file." />}
-        <div className="chart-legend"><span><i className="legend-blue" />Movement intensity</span><span><i className="legend-orange" />Heart rate (bpm)</span><small>DEMO illustration</small></div>
+        <div className="chart-legend"><span><i className="legend-blue" />Movement intensity</span><span><i className="legend-orange" />Heart rate (bpm)</span><small>{mode === "DEMO" ? "DEMO illustration" : mode === "LIVE" ? "LIVE telemetry" : "Imported CSV"}</small></div>
       </Panel>
       <Panel title="Selected day" subtitle={formatDate(selectedDate)} action={<button className="text-button" onClick={() => onNavigate("Predictive Calendar")}>Open calendar <ArrowRight size={14} /></button>}>
         <div className="day-summary">
@@ -526,7 +537,7 @@ function MonitoringPage({ observations, range, setRange, movementMetric, setMove
   const averageHeart = validObservations.length ? Math.round(validObservations.reduce((sum, item) => sum + item.heartRate!, 0) / validObservations.length) : null;
   const latest = observations.at(-1);
   return <>
-    <div className="monitor-toolbar"><div><span className="live-indicator" />{mode === "LIVE" ? "SOURCE STATUS" : mode === "CSV" ? "IMPORTED OBSERVATIONS" : "DEMO OBSERVATIONS"}<strong>{mode === "LIVE" ? "API integration point" : `${observations.length} records · ${formatDate(selectedDate)}`}</strong></div><div className="toolbar-controls"><select aria-label="Chart time range" value={range} onChange={(event) => setRange(event.target.value)}>{["5 minutes", "15 minutes", "1 hour", "6 hours", "24 hours"].map((value) => <option key={value} disabled={!availableRanges.includes(value)}>{value}</option>)}</select>{mode !== "DEMO" && <button className="button button-secondary" onClick={onImport}><Upload size={15} />Import CSV</button>}</div></div>
+    <div className="monitor-toolbar"><div><span className="live-indicator" />{mode === "LIVE" ? "SOURCE STATUS" : mode === "CSV" ? "IMPORTED OBSERVATIONS" : "DEMO OBSERVATIONS"}<strong>{mode === "LIVE" ? `${observations.length} API records · ${formatDate(selectedDate)}` : `${observations.length} records · ${formatDate(selectedDate)}`}</strong></div><div className="toolbar-controls"><select aria-label="Chart time range" value={range} onChange={(event) => setRange(event.target.value)}>{["5 minutes", "15 minutes", "1 hour", "6 hours", "24 hours"].map((value) => <option key={value} disabled={!availableRanges.includes(value)}>{value}</option>)}</select>{mode !== "DEMO" && <button className="button button-secondary" onClick={onImport}><Upload size={15} />Import CSV</button>}</div></div>
     <div className="metric-grid metric-grid-three"><MetricCard icon={HeartPulse} label="LATEST VALID HEART RATE" value={latest?.heartRateValid && latest.heartRate !== null ? String(latest.heartRate) : "—"} unit={latest?.heartRateValid && latest.heartRate !== null ? "bpm" : undefined} detail={latest ? `Latest record ${formatTime(latest.timestamp)}` : "No valid reading"} tone="rose" /><MetricCard icon={Activity} label="AVERAGE HEART RATE" value={averageHeart === null ? "—" : String(averageHeart)} unit={averageHeart === null ? undefined : "bpm"} detail={validObservations.length ? `${validObservations.length} valid records · selected date` : "No valid readings for selected date"} tone="blue" /><MetricCard icon={Thermometer} label="SENSOR TEMPERATURE" value={latest?.sensorTemperature === null || latest?.sensorTemperature === undefined ? "—" : latest.sensorTemperature.toFixed(1)} unit={latest?.sensorTemperature == null ? undefined : "°C"} detail="Skin-site sensor reading, when available" tone="amber" /></div>
     <div className="overview-grid">
       <Panel title="Heart-rate trend" subtitle="MAX30102 estimate · BPM" className="wide-panel">{visibleObservations.some((item) => item.heartRateValid && item.heartRate !== null) ? <><LineChart observations={visibleObservations} primary="heartRate" height={260} /><div className="chart-legend"><span><i className="legend-blue" />Valid estimates (bpm)</span><small>{visibleObservations.filter((item) => !item.heartRateValid || item.heartRate === null).length} missing or invalid samples omitted</small></div></> : <EmptyState title="No valid heart-rate estimates" detail="Signal quality or source data may be unavailable for this date and range." />}</Panel>
@@ -664,13 +675,13 @@ function SettingsPage({ mode, onModeChange, onImport, onClear }: { mode: DataMod
       </div>
     </Panel>
     <Panel title="Import historical observations" subtitle="CSV is parsed locally; invalid timestamps are skipped and readings are range-checked.">
-      <div className="import-drop"><div className="import-icon"><Upload size={20} /></div><strong>Select an observation CSV</strong><p>Required column: <code>timestamp</code>. Optional columns: <code>heart_rate</code>, <code>sensor_temperature</code>, <code>ambient_temperature</code>, <code>humidity</code>, <code>movement_intensity</code>, <code>pillbox_state</code>, <code>routine_state</code>.</p><label className="button button-primary upload-label"><Upload size={15} />Choose CSV file<input type="file" accept=".csv,text/csv" onChange={(event) => void onImport(event)} /></label></div>
-      <div className="schema-note"><strong>Supported CSV fields</strong><span>timestamp, sequence_number, heart_rate, heart_rate_valid, sensor_temperature, ambient_temperature, humidity, pillbox_state, routine_state, movement_intensity</span></div>
+      <div className="import-drop"><div className="import-icon"><Upload size={20} /></div><strong>Select an observation CSV</strong><p>Required column: <code>timestamp</code>. The backend telemetry CSV is supported, including <code>pulse_rate_bpm</code>, <code>skin_temperature_c</code>, <code>room_temperature_c</code>, <code>room_humidity_percent</code>, acceleration axes, <code>pillbox_open</code>, and <code>sensor_validity</code>.</p><label className="button button-primary upload-label"><Upload size={15} />Choose CSV file<input type="file" accept=".csv,text/csv" onChange={(event) => void onImport(event)} /></label></div>
+      <div className="schema-note"><strong>Also accepted</strong><span>heart_rate, heart_rate_valid, sensor_temperature, ambient_temperature, humidity, pillbox_state, routine_state, movement_intensity</span></div>
       <button className="text-button danger-text" onClick={() => setConfirmClear(true)}>Clear imported browser data</button>
     </Panel>
-    <Panel title="Live API integration" subtitle="The frontend contract is defined; a backend endpoint is not present in this repository.">
-      <div className="integration-code"><span>GET</span> {import.meta.env.VITE_API_BASE_URL || "http://localhost:8000"}/api/dashboard</div>
-      <p className="integration-copy">Expected JSON top-level fields: <code>observations</code>, <code>forecasts</code>, and <code>events</code>. Configure <code>VITE_API_BASE_URL</code> in <code>frontend/.env.local</code>. Live mode shows an error when the API is unavailable and never substitutes demo data.</p>
+    <Panel title="Live API integration" subtitle="Live mode reads the validated version 1.0 telemetry history.">
+      <div className="integration-code"><span>GET</span> {import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000"}/api/v1/telemetry/history?limit=500</div>
+      <p className="integration-copy">Set <code>VITE_API_BASE_URL</code> in <code>frontend/.env.local</code> only when the API is not at the default local address. Live mode shows an error when the API is unavailable and never substitutes demo data. Forecasts and action events are left empty until those services are implemented.</p>
       <div className="calendar-note"><ShieldCheck size={16} /><span>Do not put API credentials in frontend environment variables. Keep secrets on a server-side service.</span></div>
     </Panel>
     {confirmClear && <div className="modal-backdrop" role="presentation"><div className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="clear-heading"><h2 id="clear-heading">Clear local CSV data?</h2><p>This removes imported observations from this browser. Demo records and live service data are not affected.</p><div><button className="button button-secondary" onClick={() => setConfirmClear(false)}>Cancel</button><button className="button button-danger" onClick={() => { onClear(); setConfirmClear(false); }}>Clear data</button></div></div></div>}

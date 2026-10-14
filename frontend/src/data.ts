@@ -59,12 +59,24 @@ export type CsvParseResult = {
   duplicateRows: number;
 };
 
-type ApiObservation = Pick<Observation, "timestamp"> & Partial<Omit<Observation, "timestamp" | "source">>;
-type ApiForecast = Pick<Forecast, "targetDate" | "generatedAt" | "status"> & Partial<Omit<Forecast, "targetDate" | "generatedAt" | "status" | "source">>;
-type ApiDashboardData = {
-  observations: ApiObservation[];
-  forecasts: ApiForecast[];
-  events: Omit<ActivityEvent, "source">[];
+type ApiTelemetryRecord = {
+  schema_version: "1.0";
+  source: "simulated" | "hardware";
+  device_id: string;
+  sequence: number;
+  timestamp: string;
+  acceleration_x_m_s2: number | null;
+  acceleration_y_m_s2: number | null;
+  acceleration_z_m_s2: number | null;
+  angular_velocity_x_rad_s: number | null;
+  angular_velocity_y_rad_s: number | null;
+  angular_velocity_z_rad_s: number | null;
+  pulse_rate_bpm: number | null;
+  skin_temperature_c: number | null;
+  room_temperature_c: number | null;
+  room_humidity_percent: number | null;
+  pillbox_open: boolean | null;
+  sensor_validity: { mpu6050: boolean; max30102: boolean; ds18b20: boolean };
 };
 
 const localDateKey = (date: Date) => {
@@ -161,128 +173,82 @@ export function createDemoData(): DashboardData {
 }
 
 export async function loadLiveData(): Promise<DashboardData> {
-  const baseUrl = import.meta.env.VITE_API_BASE_URL?.trim();
-  if (!baseUrl) {
-    throw new Error("Live data is not configured. Set VITE_API_BASE_URL when the dashboard API is available.");
-  }
+  const baseUrl = import.meta.env.VITE_API_BASE_URL?.trim() || "http://127.0.0.1:8000";
 
   let response: Response;
   try {
-    response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/dashboard`);
+    response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/v1/telemetry/history?limit=500`);
   } catch {
     throw new Error("Could not reach the dashboard API. Check the API service and connection.");
   }
 
   if (!response.ok) {
-    throw new Error(`Dashboard API returned ${response.status} ${response.statusText}.`);
+    throw new Error(`Telemetry API returned ${response.status} ${response.statusText}.`);
   }
 
   const payload: unknown = await response.json();
-  if (!isDashboardData(payload)) {
-    throw new Error("Dashboard API response did not match the expected data contract.");
+  if (!Array.isArray(payload) || !payload.every(isTelemetryRecord)) {
+    throw new Error("Telemetry API response did not match schema version 1.0.");
   }
 
-  return {
-    observations: payload.observations.map((item) => ({
-      ...item,
-      heartRate: item.heartRate ?? null,
-      heartRateValid: item.heartRateValid === true,
-      sensorTemperature: item.sensorTemperature ?? null,
-      ambientTemperature: item.ambientTemperature ?? null,
-      humidity: item.humidity ?? null,
-      movement: item.movement ?? null,
-      pillboxState: item.pillboxState ?? "Unknown",
-      routineState: item.routineState ?? null,
+  const observations: Observation[] = payload.map((record) => {
+    const heartRate = record.sensor_validity.max30102 ? record.pulse_rate_bpm : null;
+    return {
+      timestamp: record.timestamp,
+      heartRate,
+      heartRateValid: heartRate !== null,
+      sensorTemperature: record.sensor_validity.ds18b20 ? record.skin_temperature_c : null,
+      ambientTemperature: record.room_temperature_c,
+      humidity: record.room_humidity_percent,
+      movement: movementFromAcceleration(record),
+      pillboxState: record.pillbox_open === null ? "Unknown" : record.pillbox_open ? "Open" : "Closed",
+      routineState: null,
       source: "LIVE",
-    })),
-    forecasts: payload.forecasts.map((item) => ({
-      ...item,
-      typicalWakeTime: item.typicalWakeTime ?? null,
-      wakeTime: item.wakeTime ?? null,
-      wakeWindow: item.wakeWindow ?? null,
-      earlyRiseProbability: item.earlyRiseProbability ?? null,
-      wakeConfidence: item.wakeConfidence ?? null,
-      missedInteractionProbability: item.missedInteractionProbability ?? null,
-      medicationWindow: item.medicationWindow ?? null,
-      hourly: item.hourly ?? [],
-      source: "LIVE",
-    })),
-    events: payload.events.map((item) => ({ ...item, source: "LIVE" })),
-  };
-}
+    };
+  }).sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp));
 
-function isDashboardData(value: unknown): value is ApiDashboardData {
-  if (!value || typeof value !== "object") return false;
-  const data = value as Record<string, unknown>;
-  return Array.isArray(data.observations)
-    && Array.isArray(data.forecasts)
-    && Array.isArray(data.events)
-    && data.observations.every(isApiObservation)
-    && data.forecasts.every(isApiForecast)
-    && data.events.every(isApiEvent);
+  return {
+    observations,
+    forecasts: [],
+    events: [],
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function isOptionalNumber(value: unknown): value is number | null | undefined {
-  return value === undefined || value === null || (typeof value === "number" && Number.isFinite(value));
+function isNullableFiniteNumber(value: unknown): value is number | null {
+  return value === null || (typeof value === "number" && Number.isFinite(value));
 }
 
-function isApiObservation(value: unknown): value is ApiObservation {
-  if (!isRecord(value)) return false;
-  return typeof value.timestamp === "string"
-    && !Number.isNaN(Date.parse(value.timestamp))
-    && isOptionalNumber(value.heartRate)
-    && (value.heartRateValid === undefined || typeof value.heartRateValid === "boolean")
-    && isOptionalNumber(value.sensorTemperature)
-    && isOptionalNumber(value.ambientTemperature)
-    && isOptionalNumber(value.humidity)
-    && isOptionalNumber(value.movement)
-    && (value.pillboxState === undefined || value.pillboxState === "Open" || value.pillboxState === "Closed" || value.pillboxState === "Unknown")
-    && (value.routineState === undefined || value.routineState === null || typeof value.routineState === "string");
-}
-
-function isApiForecast(value: unknown): value is ApiForecast {
-  if (!isRecord(value)) return false;
-  const probability = (item: unknown) => item === undefined || item === null
-    || (typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= 1);
-  return typeof value.targetDate === "string"
-    && typeof value.generatedAt === "string"
-    && !Number.isNaN(Date.parse(value.generatedAt))
-    && ["Saved demo forecast", "Outcome pending", "Evaluated"].includes(String(value.status))
-    && (value.wakeTime === undefined || value.wakeTime === null || typeof value.wakeTime === "string")
-    && (value.wakeWindow === undefined || value.wakeWindow === null || typeof value.wakeWindow === "string")
-    && (value.typicalWakeTime === undefined || value.typicalWakeTime === null || typeof value.typicalWakeTime === "string")
-    && probability(value.earlyRiseProbability)
-    && probability(value.wakeConfidence)
-    && probability(value.missedInteractionProbability)
-    && (value.medicationWindow === undefined || value.medicationWindow === null || typeof value.medicationWindow === "string")
-    && (value.hourly === undefined || (Array.isArray(value.hourly) && value.hourly.every(isHourlyForecast)));
-}
-
-function isHourlyForecast(value: unknown): value is HourlyForecast {
-  if (!isRecord(value)) return false;
-  const probability = (item: unknown) => item === undefined || item === null
-    || (typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= 1);
-  return typeof value.window === "string"
-    && typeof value.routineState === "string"
-    && typeof value.event === "string"
-    && probability(value.probability)
-    && probability(value.confidence)
-    && (value.status === "Forecast" || value.status === "Outcome pending");
-}
-
-function isApiEvent(value: unknown): value is Omit<ActivityEvent, "source"> {
-  if (!isRecord(value)) return false;
-  return typeof value.id === "string"
+function isTelemetryRecord(value: unknown): value is ApiTelemetryRecord {
+  if (!isRecord(value) || !isRecord(value.sensor_validity)) return false;
+  const validity = value.sensor_validity;
+  const measurementFields = [
+    "acceleration_x_m_s2", "acceleration_y_m_s2", "acceleration_z_m_s2",
+    "angular_velocity_x_rad_s", "angular_velocity_y_rad_s", "angular_velocity_z_rad_s",
+    "pulse_rate_bpm", "skin_temperature_c", "room_temperature_c", "room_humidity_percent",
+  ];
+  return value.schema_version === "1.0"
+    && (value.source === "hardware" || value.source === "simulated")
+    && typeof value.device_id === "string"
+    && Number.isInteger(value.sequence)
     && typeof value.timestamp === "string"
     && !Number.isNaN(Date.parse(value.timestamp))
-    && typeof value.type === "string"
-    && typeof value.description === "string"
-    && ["Observed", "Predicted", "Demo action", "Unavailable"].includes(String(value.status))
-    && typeof value.device === "string";
+    && measurementFields.every((field) => isNullableFiniteNumber(value[field]))
+    && (value.pillbox_open === null || typeof value.pillbox_open === "boolean")
+    && typeof validity.mpu6050 === "boolean"
+    && typeof validity.max30102 === "boolean"
+    && typeof validity.ds18b20 === "boolean";
+}
+
+function movementFromAcceleration(record: ApiTelemetryRecord): number | null {
+  const axes = [record.acceleration_x_m_s2, record.acceleration_y_m_s2, record.acceleration_z_m_s2];
+  if (!record.sensor_validity.mpu6050 || axes.some((axis) => axis === null)) return null;
+  const magnitude = Math.hypot(axes[0]!, axes[1]!, axes[2]!);
+  // Approximate activity as deviation from gravity, normalized to 0..1.
+  return Math.min(Math.max((magnitude - 9.80665) / 9.80665, 0), 1);
 }
 
 function parseCsvRows(text: string): string[][] {
@@ -326,7 +292,7 @@ function optionalNumber(raw: string | undefined, min: number, max: number): numb
 export function parseObservationCsv(text: string): CsvParseResult {
   const rows = parseCsvRows(text);
   if (rows.length < 2) throw new Error("CSV must include a header and at least one data row.");
-  const headers = rows[0].map((header) => header.toLowerCase().replace(/[\s-]+/g, "_"));
+  const headers = rows[0].map((header) => header.replace(/^\uFEFF/, "").toLowerCase().replace(/[\s-]+/g, "_"));
   const column = (...names: string[]) => headers.findIndex((header) => names.includes(header));
   const timestampIndex = column("timestamp", "observed_at", "time");
   if (timestampIndex < 0) throw new Error("CSV needs a timestamp, observed_at, or time column.");
@@ -352,20 +318,63 @@ export function parseObservationCsv(text: string): CsvParseResult {
       continue;
     }
     seen.add(normalizedTimestamp);
-    const validIndex = column("heart_rate_valid");
-    const validCell = validIndex < 0 ? undefined : cells[validIndex]?.toLowerCase();
-    const heartRate = numberAt(cells, ["heart_rate", "bpm"], 25, 240);
+    const heartRateValue = numberAt(cells, ["heart_rate", "pulse_rate_bpm", "bpm"], 0, 300);
+    const heartRate = heartRateValue !== null && heartRateValue > 0 ? heartRateValue : null;
+    const validityIndex = column("sensor_validity");
+    let sensorValidity: Record<string, unknown> | null = null;
+    if (validityIndex >= 0 && cells[validityIndex]) {
+      try {
+        const parsed: unknown = JSON.parse(cells[validityIndex]);
+        if (isRecord(parsed)) sensorValidity = parsed;
+      } catch {
+        sensorValidity = null;
+      }
+    }
+    const explicitHeartValidityIndex = column("heart_rate_valid");
+    const explicitHeartValidity = explicitHeartValidityIndex < 0
+      ? undefined
+      : cells[explicitHeartValidityIndex]?.toLowerCase();
+    const heartRateValid = heartRate !== null
+      && explicitHeartValidity !== "false"
+      && explicitHeartValidity !== "0"
+      && sensorValidity?.max30102 !== false;
+
     const stateIndex = column("pillbox_state");
-    const rawPillbox = stateIndex < 0 ? "" : cells[stateIndex]?.toLowerCase();
+    const pillboxOpenIndex = column("pillbox_open");
+    const rawPillbox = stateIndex >= 0
+      ? cells[stateIndex]?.toLowerCase()
+      : pillboxOpenIndex >= 0
+        ? cells[pillboxOpenIndex]?.toLowerCase()
+        : "";
+    const pillboxState = ["open", "true", "1", "yes"].includes(rawPillbox)
+      ? "Open"
+      : ["closed", "false", "0", "no"].includes(rawPillbox)
+        ? "Closed"
+        : "Unknown";
+
+    const acceleration = [
+      numberAt(cells, ["acceleration_x_m_s2"], -1000, 1000),
+      numberAt(cells, ["acceleration_y_m_s2"], -1000, 1000),
+      numberAt(cells, ["acceleration_z_m_s2"], -1000, 1000),
+    ];
+    let movement = numberAt(cells, ["movement_intensity", "movement"], 0, 10000);
+    if (movement === null && sensorValidity?.mpu6050 !== false && acceleration.every((axis) => axis !== null)) {
+      const magnitude = Math.hypot(acceleration[0]!, acceleration[1]!, acceleration[2]!);
+      movement = Math.min(Math.max((magnitude - 9.80665) / 9.80665, 0), 1);
+    }
+
+    const skinTemperature = sensorValidity?.ds18b20 === false
+      ? null
+      : numberAt(cells, ["sensor_temperature", "skin_site_temperature", "skin_temperature_c"], -55, 125);
     observations.push({
       timestamp: normalizedTimestamp,
       heartRate,
-      heartRateValid: heartRate !== null && validCell !== "false" && validCell !== "0",
-      sensorTemperature: numberAt(cells, ["sensor_temperature", "skin_site_temperature"], -20, 80),
-      ambientTemperature: numberAt(cells, ["ambient_temperature"], -20, 80),
-      humidity: numberAt(cells, ["humidity", "relative_humidity"], 0, 100),
-      movement: numberAt(cells, ["movement_intensity", "movement"], 0, 10000),
-      pillboxState: rawPillbox === "open" ? "Open" : rawPillbox === "closed" ? "Closed" : "Unknown",
+      heartRateValid,
+      sensorTemperature: skinTemperature,
+      ambientTemperature: numberAt(cells, ["ambient_temperature", "room_temperature_c"], -50, 100),
+      humidity: numberAt(cells, ["humidity", "relative_humidity", "room_humidity_percent"], 0, 100),
+      movement,
+      pillboxState,
       routineState: (column("routine_state") >= 0 ? cells[column("routine_state")] : "") || null,
       source: "CSV",
     });
