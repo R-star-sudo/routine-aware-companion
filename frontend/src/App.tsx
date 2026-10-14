@@ -1,7 +1,7 @@
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import {
   Activity, ArrowDownRight, ArrowRight, ArrowUpRight, Bell, CalendarDays, Check,
-  ChevronLeft, ChevronRight, CircleAlert, Clock3, CloudOff, HeartPulse, Home,
+  ChevronLeft, ChevronRight, CircleAlert, Clock3, CloudOff, Download, HeartPulse, Home,
   Leaf, Menu, Mic2, Pill, RefreshCw, Settings2, ShieldCheck, Thermometer,
   Upload, Watch, Waves, X,
 } from "lucide-react";
@@ -9,6 +9,7 @@ import {
   ActivityEvent, createDemoData, DashboardData, DataMode, dateKey, formatDate,
   formatTime, Forecast, getImportedObservations, getSavedEvents, loadLiveData,
   Observation, parseObservationCsv, saveEvents, saveImportedObservations,
+  serializeTelemetryCsv,
 } from "./data";
 
 type PageId = "Overview" | "Predictive Calendar" | "Live Monitoring" | "Routine Analytics"
@@ -257,6 +258,27 @@ function App() {
     }
   };
 
+  const downloadTelemetryCsv = () => {
+    if (data.observations.length === 0 || mode === "DEMO") return;
+
+    const csv = serializeTelemetryCsv(data.observations);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    link.href = url;
+    link.download = `routine-aware-telemetry-${timestamp}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+    setNotice(mode === "LIVE"
+      ? `Downloaded ${data.observations.length} live telemetry records. Live history currently provides up to 500 records.`
+      : `Downloaded ${data.observations.length} imported CSV observations.`);
+    window.setTimeout(() => setNotice(""), 6000);
+  };
+
   return (
     <div className="app-shell">
       <aside className={`sidebar ${mobileMenu ? "sidebar-open" : ""}`}>
@@ -319,6 +341,12 @@ function App() {
           <div className="page-heading">
             <div><div className="eyebrow">ROUTINE-AWARE COMPANION <span className="eyebrow-line" /></div><h1>{page}</h1><p>{pageDescription(page)}</p></div>
             <div className="heading-actions">
+              <button
+                className="button button-secondary"
+                onClick={downloadTelemetryCsv}
+                disabled={mode === "DEMO" || data.observations.length === 0 || loading || (mode === "LIVE" && !liveAvailable)}
+                title={mode === "LIVE" ? "Download the live telemetry records currently loaded in the dashboard (up to 500)." : "Download the imported telemetry observations as CSV."}
+              ><Download size={15} />Download CSV</button>
               {page !== "Settings" && <button className="button button-secondary" onClick={() => void refresh()} disabled={loading}><RefreshCw size={15} className={loading ? "spin" : ""} />{loading ? "Syncing" : "Refresh"}</button>}
               {page !== "Settings" && <button className="date-chip" onClick={() => setPage("Predictive Calendar")}><CalendarDays size={16} />{formatDate(selectedDate)}<ChevronRight size={14} /></button>}
             </div>

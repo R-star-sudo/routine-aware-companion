@@ -1,10 +1,22 @@
 # Routine-Aware Companion - PowerShell Launcher
+param(
+    [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
+    [string[]]$Inputs
+)
+
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+$collectorArgs = if ($Inputs -and $Inputs.Count -gt 0) {
+    $Inputs -join " "
+} else {
+    "07:00:00 1"
+}
 
 Write-Host "======================================================================" -ForegroundColor Cyan
 Write-Host "         ROUTINE-AWARE COMPANION - 1-CLICK LAUNCHER                   " -ForegroundColor White -BackgroundColor DarkBlue
 Write-Host "======================================================================" -ForegroundColor Cyan
+Write-Host " Simulation Clock Parameters: $collectorArgs" -ForegroundColor Yellow
 Write-Host ""
 
 # 1. Start Backend API Server
@@ -14,8 +26,8 @@ Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root\backend
 Start-Sleep -Seconds 2
 
 # 2. Start Base Station Collector
-Write-Host "[2/3] Starting Base Station Collector on COM5..." -ForegroundColor Yellow
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root\backend'; & '.\.venv\Scripts\python.exe' -m app.collector --serial-port COM5 --baudrate 115200 --simulation-start '2026-10-15T07:00:00+05:30' --simulation-rate 60"
+Write-Host "[2/3] Starting Base Station Collector on COM5 ($collectorArgs)..." -ForegroundColor Yellow
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root\backend'; & '.\.venv\Scripts\python.exe' -m app.collector --serial-port COM5 --baudrate 115200 $collectorArgs"
 
 Start-Sleep -Seconds 1
 
@@ -32,9 +44,6 @@ Write-Host ""
 Write-Host "======================================================================" -ForegroundColor Green
 Write-Host " All 3 services have been launched in separate terminal windows:" -ForegroundColor Green
 Write-Host "   1. Backend API:     http://127.0.0.1:8000" -ForegroundColor White
-Write-Host "   2. Serial Collector: Ingesting COM5 into API" -ForegroundColor White
+Write-Host "   2. Serial Collector: Ingesting COM5 into API ($collectorArgs)" -ForegroundColor White
 Write-Host "   3. Web Dashboard:   http://localhost:5173" -ForegroundColor White
-Write-Host ""
-Write-Host " In the dashboard browser:" -ForegroundColor Cyan
-Write-Host "   Click Settings -> Data source -> Select 'Live dashboard API'" -ForegroundColor Yellow
 Write-Host "======================================================================" -ForegroundColor Green

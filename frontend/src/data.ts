@@ -11,6 +11,7 @@ export type Observation = {
   pillboxState: "Open" | "Closed" | "Unknown";
   routineState: string | null;
   source: DataMode;
+  rawTelemetry?: Record<string, unknown>;
 };
 
 export type Forecast = {
@@ -78,6 +79,55 @@ type ApiTelemetryRecord = {
   pillbox_open: boolean | null;
   sensor_validity: { mpu6050: boolean; max30102: boolean; ds18b20: boolean };
 };
+
+const TELEMETRY_CSV_COLUMNS = [
+  "schema_version", "source", "device_id", "sequence", "timestamp",
+  "acceleration_x_m_s2", "acceleration_y_m_s2", "acceleration_z_m_s2",
+  "angular_velocity_x_rad_s", "angular_velocity_y_rad_s", "angular_velocity_z_rad_s",
+  "pulse_rate_bpm", "skin_temperature_c", "room_temperature_c",
+  "room_humidity_percent", "pillbox_open", "sensor_validity",
+];
+
+function csvCell(value: unknown): string {
+  const text = value === null || value === undefined
+    ? ""
+    : typeof value === "object" ? JSON.stringify(value) ?? "" : String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+/** Serialize raw telemetry fields where available, with UI readings as a fallback for imported legacy CSVs. */
+export function serializeTelemetryCsv(observations: Observation[]): string {
+  const rows = observations.map((observation) => {
+    const raw = observation.rawTelemetry ?? {};
+    const value = (field: string, fallback: unknown = "") =>
+      Object.prototype.hasOwnProperty.call(raw, field) ? raw[field] : fallback;
+    const pillboxFallback = observation.pillboxState === "Open"
+      ? true
+      : observation.pillboxState === "Closed" ? false : "";
+    const fields: unknown[] = [
+      value("schema_version"),
+      value("source"),
+      value("device_id"),
+      value("sequence"),
+      observation.timestamp,
+      value("acceleration_x_m_s2"),
+      value("acceleration_y_m_s2"),
+      value("acceleration_z_m_s2"),
+      value("angular_velocity_x_rad_s"),
+      value("angular_velocity_y_rad_s"),
+      value("angular_velocity_z_rad_s"),
+      value("pulse_rate_bpm", observation.heartRate),
+      value("skin_temperature_c", observation.sensorTemperature),
+      value("room_temperature_c", observation.ambientTemperature),
+      value("room_humidity_percent", observation.humidity),
+      value("pillbox_open", pillboxFallback),
+      value("sensor_validity"),
+    ];
+    return fields.map(csvCell).join(",");
+  });
+
+  return `${TELEMETRY_CSV_COLUMNS.join(",")}\r\n${rows.join("\r\n")}\r\n`;
+}
 
 const localDateKey = (date: Date) => {
   const year = date.getFullYear();
@@ -204,6 +254,7 @@ export async function loadLiveData(): Promise<DashboardData> {
       pillboxState: (record.pillbox_open === null ? "Unknown" : record.pillbox_open ? "Open" : "Closed") as "Open" | "Closed" | "Unknown",
       routineState: null,
       source: "LIVE" as const,
+      rawTelemetry: { ...record },
     };
   }).sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp));
 
@@ -377,6 +428,7 @@ export function parseObservationCsv(text: string): CsvParseResult {
       pillboxState,
       routineState: (column("routine_state") >= 0 ? cells[column("routine_state")] : "") || null,
       source: "CSV",
+      rawTelemetry: Object.fromEntries(headers.map((header, index) => [header, cells[index] ?? ""])),
     });
   }
 

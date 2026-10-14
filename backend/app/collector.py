@@ -245,21 +245,57 @@ def _reject_non_finite(value: str) -> None:
     raise ValueError(f"{value} is not a valid JSON number")
 
 
-def simulation_clock_command(start_time: str, rate: int = 60) -> str:
-    """Create the base-station command for a timezone-aware simulation start."""
+def _parse_simulation_start(start_time: str) -> datetime:
+    """Parse flexible date/time strings (ISO, simple datetime, time-only, or 'now') with local timezone fallback."""
     normalized = start_time.strip()
-    if normalized.endswith(("Z", "z")):
-        normalized = normalized[:-1] + "+00:00"
+    if normalized.lower() == "now":
+        return datetime.now().astimezone()
+
+    # Time only: e.g. "06:00:00" or "07:30" -> today at that time in local timezone
+    if ":" in normalized and ("-" not in normalized and "/" not in normalized):
+        parts = [int(p) for p in normalized.split(":")[:3]]
+        now = datetime.now().astimezone()
+        return now.replace(
+            hour=parts[0],
+            minute=parts[1] if len(parts) > 1 else 0,
+            second=parts[2] if len(parts) > 2 else 0,
+            microsecond=0,
+        )
+
+    # Clean ISO or space formats
+    clean_val = normalized.replace("T", " ").replace("t", " ")
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%d-%m-%Y %H:%M:%S",
+        "%d-%m-%Y %H:%M",
+        "%d/%m/%Y %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+    ):
+        try:
+            return datetime.strptime(clean_val, fmt).astimezone()
+        except ValueError:
+            pass
+
+    iso_str = normalized
+    if iso_str.endswith(("Z", "z")):
+        iso_str = iso_str[:-1] + "+00:00"
+
     try:
-        parsed = datetime.fromisoformat(normalized)
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None or dt.utcoffset() is None:
+            dt = dt.astimezone()
+        return dt
     except ValueError as exc:
         raise ValueError(
-            "simulation start must be ISO-8601, for example "
-            "2026-10-14T07:00:00+05:30"
+            f"Could not parse simulation start time: '{start_time}'. "
+            "Expected formats: '06:00:00', '2024-08-09 06:00:00', or ISO-8601 '2026-10-15T07:00:00+05:30'."
         ) from exc
 
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError("simulation start must include a UTC offset or Z")
+
+def simulation_clock_command(start_time: str, rate: int = 60) -> str:
+    """Create the base-station command for a timezone-aware simulation start."""
+    parsed = _parse_simulation_start(start_time)
     if not isinstance(rate, int) or rate <= 0 or rate > 3600:
         raise ValueError("simulation rate must be an integer from 1 through 3600")
 
@@ -338,7 +374,53 @@ def main() -> int:
         action="store_true",
         help="Set the clock and print serial output without posting telemetry to the API",
     )
+    parser.add_argument(
+        "inputs",
+        nargs="*",
+        help="Optional smart inputs: time (06:00:00), date (2024-08-09), rate (1 or 10), or port (COM5)",
+    )
     args = parser.parse_args()
+
+    input_time = None
+    input_date = None
+    for token in args.inputs:
+        val = token.strip()
+        if not val:
+            continue
+        lower = val.lower()
+        if lower.startswith("com") and (len(lower) == 3 or lower[3:].isdigit()):
+            args.serial_port = val.upper()
+        elif lower.endswith("x") and lower[:-1].isdigit():
+            args.simulation_rate = int(lower[:-1])
+        elif val.isdigit():
+            args.simulation_rate = int(val)
+        elif ":" in val and " " not in val:
+            input_time = val
+        elif ("-" in val or "/" in val) and " " not in val:
+            input_date = val
+        elif " " in val or "t" in lower:
+            args.simulation_start = val
+        elif lower == "now":
+            input_time = "now"
+        elif lower == "today":
+            input_date = datetime.now().strftime("%Y-%m-%d")
+
+    if input_time or input_date:
+        if input_date and input_time:
+            args.simulation_start = f"{input_date} {input_time}"
+        elif input_time:
+            args.simulation_start = input_time
+        elif input_date:
+            args.simulation_start = f"{input_date} 00:00:00"
+
+    if args.simulation_start and args.simulation_rate is None:
+        args.simulation_rate = 1
+    elif args.simulation_rate is not None and not args.simulation_start:
+        args.simulation_start = "now"
+
+    if args.simulation_start and not args.serial_port:
+        args.serial_port = "COM5"
+
     if args.baudrate < 1:
         parser.error("--baudrate must be positive")
     if args.simulation_start and not args.serial_port:
@@ -350,7 +432,7 @@ def main() -> int:
     if (args.model_parameters or args.speak_test or args.base_command) and not args.serial_port:
         parser.error("base-station commands require --serial-port")
 
-    simulation_rate = args.simulation_rate if args.simulation_rate is not None else 60
+    simulation_rate = args.simulation_rate if args.simulation_rate is not None else 1
     startup_commands: list[str] = []
     if args.simulation_start:
         try:
