@@ -1,7 +1,11 @@
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from app.services.voice_service import generate_speech, validate_speech_text
 
 from app.schemas.telemetry import TelemetryRecord
 from app.services.telemetry_storage import TelemetryStorageError, TelemetryStore
@@ -9,9 +13,23 @@ from app.services.telemetry_storage import TelemetryStorageError, TelemetryStore
 logger = logging.getLogger(__name__)
 
 
+class SpeechRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=1200)
+
+
+
 def create_app(storage_path: Path | None = None) -> FastAPI:
     application = FastAPI(title="Routine-Aware Companion API")
     application.state.telemetry_store = TelemetryStore(storage_path)
+    # Allow only the local Vite development origins. Production deployments
+    # should replace these with the exact dashboard origin.
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
+    )
 
     @application.get("/")
     def root() -> dict[str, str]:
@@ -58,6 +76,20 @@ def create_app(storage_path: Path | None = None) -> FastAPI:
         except TelemetryStorageError as exc:
             logger.exception("Failed to retrieve telemetry history")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @application.post("/api/v1/voice/speech")
+    def create_voice_speech(payload: SpeechRequest) -> Response:
+        """Generate a short ElevenLabs MP3 for the dashboard speaker."""
+        spoken_text = validate_speech_text(payload.text)
+        audio = generate_speech(spoken_text)
+        return Response(
+            content=audio,
+            media_type="audio/mpeg",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     return application
 
