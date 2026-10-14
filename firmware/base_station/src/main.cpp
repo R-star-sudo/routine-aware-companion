@@ -74,6 +74,11 @@ static const uint32_t REMINDER_LED_TIMEOUT_MS = 120000;
 static const uint32_t STATUS_BLINK_SLOW_MS = 1000;
 static const uint32_t STATUS_BLINK_FAST_MS = 200;
 static const uint32_t CARETAKER_LED_PULSE_MS = 500;
+// Keep an all-LED bench test visible even if the host test script immediately
+// sends OFF after receiving EOF from its terminal input prompt.
+static const uint32_t LED_ALL_MIN_VISIBLE_MS = 1200;
+static const uint32_t LED_STATUS_OFF_AFTER_TEST_MS = 2000;
+static const uint32_t LED_ALL_TEST_MAX_ON_MS = 60000;
 
 // ============================================================================
 // Wearable Telemetry Data Structure (EXACT REPLICA of wearable SensorData)
@@ -186,6 +191,12 @@ uint32_t afternoonLedTurnedOnAt = 0;
 uint32_t nightLedTurnedOnAt = 0;
 uint32_t caretakerLedTurnedOnAt = 0;
 uint32_t lastCaretakerPulseTime = 0;
+bool allLedTestActive = false;
+bool allLedOffPending = false;
+uint32_t allLedTestStartedAt = 0;
+bool statusLedManualOverrideActive = false;
+bool statusLedHoldOffActive = false;
+uint32_t statusLedHoldOffUntil = 0;
 
 struct ModelParameters {
   float mu_g;
@@ -225,6 +236,68 @@ bool verifyChecksum(const SensorData &data) {
 }
 
 /**
+ * @brief Drives all seven discrete Base Station LED outputs together.
+ *
+ * GPIO 16/17/18/19/25 are digital outputs; GPIO 23/27 are LEDC PWM outputs.
+ * This sets the requested electrical output state only. It cannot detect
+ * whether an LED is physically connected or illuminated.
+ */
+void writeAllLedOutputs(bool on) {
+  const uint32_t now = millis();
+  morningLedOn = on;
+  afternoonLedOn = on;
+  nightLedOn = on;
+  caretakerLedOn = on;
+  caretakerLedOutputOn = on;
+  statusLedOn = on;
+  morningLedTurnedOnAt = on ? now : 0;
+  afternoonLedTurnedOnAt = on ? now : 0;
+  nightLedTurnedOnAt = on ? now : 0;
+  caretakerLedTurnedOnAt = on ? now : 0;
+  lastCaretakerPulseTime = now;
+  pathWcBrightness = on ? 255 : 0;
+  pathKitBrightness = on ? 255 : 0;
+
+  digitalWrite(PIN_LED_MORNING, on ? HIGH : LOW);
+  digitalWrite(PIN_LED_AFTERNOON, on ? HIGH : LOW);
+  digitalWrite(PIN_LED_NIGHT, on ? HIGH : LOW);
+  digitalWrite(PIN_LED_CARETAKER, on ? HIGH : LOW);
+  digitalWrite(PIN_LED_STATUS, on ? HIGH : LOW);
+  ledcWrite(0, pathWcBrightness);
+  ledcWrite(1, pathKitBrightness);
+}
+
+/**
+ * @brief Completes an all-LED diagnostic OFF request and briefly keeps the
+ * status output dark so the test's OFF state is visibly distinguishable.
+ */
+void finishAllLedTest() {
+  allLedOffPending = false;
+  allLedTestActive = false;
+  statusLedManualOverrideActive = false;
+  writeAllLedOutputs(false);
+  statusLedHoldOffActive = true;
+  statusLedHoldOffUntil = millis() + LED_STATUS_OFF_AFTER_TEST_MS;
+  lastStatusLedToggleTime = millis();
+}
+
+/**
+ * @brief Applies a deferred OFF after the minimum all-on visibility interval.
+ */
+void serviceAllLedTest() {
+  const uint32_t now = millis();
+  if (allLedOffPending &&
+      now - allLedTestStartedAt >= LED_ALL_MIN_VISIBLE_MS) {
+    finishAllLedTest();
+    Serial.println(F("ACK,LED,ALL,OFF"));
+  } else if (allLedTestActive && !allLedOffPending &&
+             now - allLedTestStartedAt >= LED_ALL_TEST_MAX_ON_MS) {
+    finishAllLedTest();
+    Serial.println(F("[LEDS] All-on diagnostic timed out; outputs turned off"));
+  }
+}
+
+/**
  * @brief Returns virtual UTC Unix time, or 0 when no simulation time was set.
  */
 uint64_t getSimulationEpochSeconds() {
@@ -238,8 +311,8 @@ uint64_t getSimulationEpochSeconds() {
 }
 
 /**
- * @brief Diagnostic sweep across all 7 base station LEDs.
- *        Sequentially flashes each LED to visibly confirm electrical wiring.
+ * @brief Drives each of the 7 base station LED outputs in sequence.
+ *        The sequence does not sense or confirm physical LED illumination.
  */
 void runLedTestSweep() {
   Serial.print(F("[LEDS] Testing MORNING(16)... "));
@@ -277,7 +350,7 @@ void runLedTestSweep() {
   delay(150);
   digitalWrite(PIN_LED_STATUS, LOW);
 
-  Serial.println(F("OK (All 7 LEDs tested)"));
+  Serial.println(F("Output sequence complete; visually verify all 7 LEDs"));
 }
 
 /**
@@ -379,26 +452,30 @@ void handleSerialCommands() {
         pathKitBrightness = (uint8_t)brightness;
         ledcWrite(1, pathKitBrightness);
       } else if (strcmp(name, "STATUS") == 0 && (turnOn || turnOff)) {
+        statusLedHoldOffActive = false;
+        statusLedManualOverrideActive = turnOn;
         statusLedOn = turnOn;
         digitalWrite(PIN_LED_STATUS, statusLedOn ? HIGH : LOW);
+        if (turnOff)
+          lastStatusLedToggleTime = millis();
       } else if (strcmp(name, "ALL") == 0 && (turnOn || turnOff)) {
-        morningLedOn = turnOn;
-        afternoonLedOn = turnOn;
-        nightLedOn = turnOn;
-        caretakerLedOn = turnOn;
-        caretakerLedOutputOn = turnOn;
-        morningLedTurnedOnAt = turnOn ? millis() : 0;
-        afternoonLedTurnedOnAt = turnOn ? millis() : 0;
-        nightLedTurnedOnAt = turnOn ? millis() : 0;
-        caretakerLedTurnedOnAt = turnOn ? millis() : 0;
-        pathWcBrightness = turnOn ? 255 : 0;
-        pathKitBrightness = turnOn ? 255 : 0;
-        digitalWrite(PIN_LED_MORNING, turnOn ? HIGH : LOW);
-        digitalWrite(PIN_LED_AFTERNOON, turnOn ? HIGH : LOW);
-        digitalWrite(PIN_LED_NIGHT, turnOn ? HIGH : LOW);
-        digitalWrite(PIN_LED_CARETAKER, turnOn ? HIGH : LOW);
-        ledcWrite(0, pathWcBrightness);
-        ledcWrite(1, pathKitBrightness);
+        if (turnOn) {
+          allLedTestActive = true;
+          allLedOffPending = false;
+          allLedTestStartedAt = millis();
+          statusLedManualOverrideActive = false;
+          statusLedHoldOffActive = false;
+          writeAllLedOutputs(true);
+        } else if (allLedTestActive &&
+                   millis() - allLedTestStartedAt < LED_ALL_MIN_VISIBLE_MS) {
+          // The host script can receive EOF at its Enter prompt and send OFF
+          // immediately. Delay the physical OFF, and its ACK, long enough for
+          // the user to see the all-on state.
+          allLedOffPending = true;
+          continue;
+        } else {
+          finishAllLedTest();
+        }
       } else {
         Serial.println(F("ERR,LED,VALUE"));
         continue;
@@ -575,8 +652,10 @@ void updateHallEffect() {
   } else if (!baseData.pillbox_open && previousPillboxOpen) {
     if (pillboxOpenTiming &&
         millis() - pillboxOpenedAt >= PILLBOX_OPEN_CONFIRM_MS) {
-      morningLedOn = false;
-      digitalWrite(PIN_LED_MORNING, LOW);
+      if (!allLedTestActive) {
+        morningLedOn = false;
+        digitalWrite(PIN_LED_MORNING, LOW);
+      }
       Serial.println(F("EVENT,PILLBOX_INTERACTION"));
     }
     pillboxOpenedAt = 0;
@@ -586,9 +665,21 @@ void updateHallEffect() {
 }
 
 void updateStatusLed() {
+  if (allLedTestActive || statusLedManualOverrideActive)
+    return;
+
   const uint32_t interval =
       wearableConnected ? STATUS_BLINK_SLOW_MS : STATUS_BLINK_FAST_MS;
   const uint32_t now = millis();
+  if (statusLedHoldOffActive) {
+    if ((int32_t)(now - statusLedHoldOffUntil) < 0) {
+      statusLedOn = false;
+      digitalWrite(PIN_LED_STATUS, LOW);
+      return;
+    }
+    statusLedHoldOffActive = false;
+    lastStatusLedToggleTime = now;
+  }
   if (now - lastStatusLedToggleTime >= interval) {
     lastStatusLedToggleTime = now;
     statusLedOn = !statusLedOn;
@@ -597,6 +688,9 @@ void updateStatusLed() {
 }
 
 void updateReminderLedTimeouts() {
+  if (allLedTestActive)
+    return;
+
   const uint32_t now = millis();
 
   // Morning reminder LED auto-off after timeout
@@ -646,6 +740,11 @@ void handleWearableTapEvent(const SensorData &wearable) {
     return;
 
   lastTapEventSequence = wearable.tap_event_sequence;
+
+  if (allLedTestActive) {
+    Serial.printf("TAP,DOUBLE,%u\n", (unsigned int)lastTapEventSequence);
+    return;
+  }
 
   // Clear all active reminders upon wrist double-tap acknowledgment
   morningLedOn = false;
@@ -814,9 +913,9 @@ void setup() {
   Serial.println(F("OK"));
 
   Serial.printf(
-      "[HALL] Initializing pillbox sensor on GPIO %d (external pull-up)... ",
+      "[HALL] Initializing pillbox sensor on GPIO %d (internal pull-up)... ",
       PIN_HALL_MORNING);
-  pinMode(PIN_HALL_MORNING, INPUT);
+  pinMode(PIN_HALL_MORNING, INPUT_PULLUP);
   baseData.pillbox_open = (digitalRead(PIN_HALL_MORNING) == HIGH);
   previousPillboxOpen = baseData.pillbox_open;
   if (previousPillboxOpen) {
@@ -899,6 +998,7 @@ void setup() {
 void loop() {
   // Accept optional virtual-time updates without blocking sensor/RF work.
   handleSerialCommands();
+  serviceAllLedTest();
 
   // 1. Service local sensors (non-blocking)
   updateDht11();

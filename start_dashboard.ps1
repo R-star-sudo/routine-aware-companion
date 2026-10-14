@@ -15,7 +15,7 @@ Start-Sleep -Seconds 2
 
 # 2. Start Base Station Collector
 Write-Host "[2/3] Starting Base Station Collector on COM5..." -ForegroundColor Yellow
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root\backend'; & '.\.venv\Scripts\python.exe' -m app.collector --serial-port COM5 --baudrate 115200 --simulation-start '2026-10-14T07:00:00+05:30' --simulation-rate 60"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$root\backend'; & '.\.venv\Scripts\python.exe' -m app.collector --serial-port COM5 --baudrate 115200 --simulation-start '2026-10-15T07:00:00+05:30' --simulation-rate 60"
 
 Start-Sleep -Seconds 1
 

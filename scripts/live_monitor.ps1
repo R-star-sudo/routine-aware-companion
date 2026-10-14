@@ -1,6 +1,10 @@
 param (
     [string]$Port = "COM5",
-    [int]$BaudRate = 115200
+    [int]$BaudRate = 115200,
+    [int]$Fps = 10,
+    [string]$Time = "now",
+    [int]$Rate = 1,
+    [switch]$NoClock
 )
 
 $Host.UI.RawUI.WindowTitle = "Routine-Aware Companion - Live Telemetry ($Port)"
@@ -18,9 +22,37 @@ try {
     exit 1
 }
 
-Write-Host "Connected to $Port! Waiting for telemetry stream (Press Ctrl+C to stop)..." -ForegroundColor Green
-Start-Sleep -Milliseconds 800
+if (-not $NoClock) {
+    try {
+        $now = [DateTime]::Now
+        if (-not $Date -and ($Time -eq "now" -or [string]::IsNullOrWhiteSpace($Time))) {
+            $targetDt = $now
+        } elseif ($Date -and ($Time -eq "now" -or [string]::IsNullOrWhiteSpace($Time))) {
+            $targetDt = [DateTime]::Parse("$Date $($now.ToString('HH:mm:ss'))")
+        } elseif ($Date -and $Time) {
+            $targetDt = [DateTime]::Parse("$Date $Time")
+        } elseif ($Time -and -not $Date) {
+            if ($Time -match "^\d{1,2}:\d{2}(:\d{2})?$") {
+                $targetDt = [DateTime]::Parse("$($now.ToString('yyyy-MM-dd')) $Time")
+            } else {
+                $targetDt = [DateTime]::Parse($Time)
+            }
+        }
+        $epoch = [int64]([DateTimeOffset]$targetDt).ToUnixTimeSeconds()
+        $offsetMin = [int]([TimeZoneInfo]::Local.GetUtcOffset($targetDt).TotalMinutes)
+        Write-Host "Initializing Base Station clock to: $($targetDt.ToString('yyyy-MM-dd HH:mm:ss')) ($($Rate)x speed)..." -ForegroundColor Green
+        Start-Sleep -Milliseconds 300
+        $sp.WriteLine("SIM_CLOCK,$epoch,$offsetMin,$Rate")
+    } catch {
+        Write-Host "[WARN] Could not parse/send clock: $_" -ForegroundColor Yellow
+    }
+}
+Start-Sleep -Milliseconds 400
 
+[Console]::Clear()
+try { [Console]::CursorVisible = $false } catch {}
+
+$minIntervalMs = 1000 / [Math]::Max(1, $Fps)
 $lastRender = [DateTime]::MinValue
 
 try {
@@ -35,9 +67,9 @@ try {
             continue
         }
 
-        # Rate-limit screen refresh to ~4 times a second for clean display
+        # Rate-limit screen refresh to native stream rate
         $now = [DateTime]::UtcNow
-        if (($now - $lastRender).TotalMilliseconds -lt 250) {
+        if (($now - $lastRender).TotalMilliseconds -lt $minIntervalMs) {
             continue
         }
         $lastRender = $now
@@ -55,8 +87,9 @@ try {
         $w = $data.wearable
         $b = $data.base
         $rf = $data.rf
+        $clock = $data.clock
 
-        [Console]::Clear()
+        [Console]::SetCursorPosition(0, 0)
 
         Write-Host "======================================================================" -ForegroundColor Cyan
         Write-Host "         ROUTINE-AWARE COMPANION - LIVE TELEMETRY MONITOR             " -ForegroundColor White -BackgroundColor DarkBlue
@@ -66,7 +99,13 @@ try {
         $linkCol = if ($rf.link -eq "OK") { "Green" } else { "Red" }
         Write-Host " [RF LINK] " -NoNewline -ForegroundColor Yellow
         Write-Host "STATUS: $($rf.link) " -NoNewline -ForegroundColor $linkCol
-        Write-Host "| RX Packets: $($rf.rx) | Drops: $($rf.drop) | Gaps: $($rf.pkt_gap)" -ForegroundColor Gray
+        Write-Host "| Packets: $($rf.rx) | Drops: $($rf.drop) | Gaps: $($rf.pkt_gap) " -NoNewline -ForegroundColor Gray
+        if ($clock -and $clock.mode -eq "simulated" -and $clock.unix_s -gt 0) {
+            $clockTime = [DateTimeOffset]::FromUnixTimeSeconds([int64]$clock.unix_s).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
+            Write-Host "| Clock: $clockTime ($($clock.rate)x)" -ForegroundColor Green
+        } else {
+            Write-Host "| Clock: UNSET" -ForegroundColor Yellow
+        }
 
         Write-Host "----------------------------------------------------------------------" -ForegroundColor DarkGray
         Write-Host " [1] WEARABLE NODE (Wireless ESP-NOW 10 Hz)" -ForegroundColor Yellow
@@ -116,26 +155,33 @@ try {
         $cStr = if ($leds.caretaker) { "ALERT" } else { "OFF" }
         $sStr = if ($leds.status) { "PULSE" } else { "IDLE" }
 
+        $mCol = if ($leds.morning) { "Green" } else { "DarkGray" }
+        $aCol = if ($leds.afternoon) { "Green" } else { "DarkGray" }
+        $nCol = if ($leds.night) { "Green" } else { "DarkGray" }
+        $cCol = if ($leds.caretaker) { "Red" } else { "DarkGray" }
+        $sCol = if ($leds.status) { "Cyan" } else { "DarkGray" }
+
         Write-Host "   Reminders:   Morning: " -NoNewline -ForegroundColor Gray
-        Write-Host $mStr -NoNewline -ForegroundColor (if ($leds.morning) { "Green" } else { "DarkGray" })
+        Write-Host $mStr -NoNewline -ForegroundColor $mCol
         Write-Host " | Afternoon: " -NoNewline -ForegroundColor Gray
-        Write-Host $aStr -NoNewline -ForegroundColor (if ($leds.afternoon) { "Green" } else { "DarkGray" })
+        Write-Host $aStr -NoNewline -ForegroundColor $aCol
         Write-Host " | Night: " -NoNewline -ForegroundColor Gray
-        Write-Host $nStr -NoNewline -ForegroundColor (if ($leds.night) { "Green" } else { "DarkGray" })
+        Write-Host $nStr -NoNewline -ForegroundColor $nCol
         Write-Host " | Caretaker: " -NoNewline -ForegroundColor Gray
-        Write-Host $cStr -ForegroundColor (if ($leds.caretaker) { "Red" } else { "DarkGray" })
+        Write-Host $cStr -ForegroundColor $cCol
 
         Write-Host "   Path Lights: Washroom: " -NoNewline -ForegroundColor Gray
         Write-Host ("{0,3}/255" -f [int]$leds.path_wc) -NoNewline -ForegroundColor White
         Write-Host " | Kitchen: " -NoNewline -ForegroundColor Gray
         Write-Host ("{0,3}/255" -f [int]$leds.path_kit) -NoNewline -ForegroundColor White
         Write-Host " | Heartbeat LED: " -NoNewline -ForegroundColor Gray
-        Write-Host $sStr -ForegroundColor (if ($leds.status) { "Cyan" } else { "DarkGray" })
+        Write-Host $sStr -ForegroundColor $sCol
 
         Write-Host "======================================================================" -ForegroundColor Cyan
         Write-Host " Streaming live at 10 Hz from $Port. Press Ctrl+C to exit." -ForegroundColor DarkGray
     }
 } finally {
+    try { [Console]::CursorVisible = $true } catch {}
     if ($sp.IsOpen) {
         $sp.Close()
     }

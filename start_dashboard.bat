@@ -17,7 +17,7 @@ timeout /t 2 /nobreak >nul
 
 :: Step 2: Start Base Station Serial Collector
 echo [2/3] Starting Base Station Collector on COM5...
-start "2 - Routine Base Collector (COM5)" cmd /k "cd /d "%ROOT%backend" && .\.venv\Scripts\python.exe -m app.collector --serial-port COM5 --baudrate 115200 --simulation-start "2026-10-14T07:00:00+05:30" --simulation-rate 60"
+start "2 - Routine Base Collector (COM5)" cmd /k "cd /d "%ROOT%backend" && .\.venv\Scripts\python.exe -m app.collector --serial-port COM5 --baudrate 115200 --simulation-start "2026-10-15T07:00:00+05:30" --simulation-rate 60"
 
 :: Step 3: Check / Start Frontend
 echo [3/3] Checking Frontend UI on http://localhost:5173...

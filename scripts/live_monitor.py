@@ -6,10 +6,77 @@ an ANSI-formatted, flicker-free terminal dashboard at 4 Hz.
 """
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 import sys
 import time
+
+
+def parse_clock_inputs(date_str: str | None, time_str: str | None) -> tuple[int, int, str]:
+    """Parse date and time inputs into (unix_epoch_seconds, utc_offset_minutes, human_display)."""
+    now = datetime.now().astimezone()
+    
+    # Normalize 'today'
+    if date_str and date_str.strip().lower() == "today":
+        date_str = now.strftime("%Y-%m-%d")
+
+    # Check if user passed 'now'
+    if (not date_str and not time_str) or (time_str and time_str.strip().lower() == "now" and not date_str):
+        epoch = int(now.timestamp())
+        offset_min = int(now.utcoffset().total_seconds() // 60)
+        return epoch, offset_min, now.strftime("%Y-%m-%d %H:%M:%S")
+
+    # Build raw string from date and time
+    raw = ""
+    if date_str and time_str:
+        t = now.strftime("%H:%M:%S") if time_str.strip().lower() == "now" else time_str.strip()
+        raw = f"{date_str.strip()} {t}"
+    elif date_str and not time_str:
+        raw = f"{date_str.strip()} 00:00:00"
+    elif time_str and not date_str:
+        t = time_str.strip()
+        if " " in t or ("T" in t and len(t) > 10):
+            raw = t
+        else:
+            raw = f"{now.strftime('%Y-%m-%d')} {t}"
+
+    raw = raw.replace("T", " ").strip()
+
+    formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%d-%m-%Y %H:%M:%S",
+        "%d-%m-%Y %H:%M",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%d",
+        "%d-%m-%Y",
+    ]
+    dt = None
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(raw, fmt)
+            break
+        except ValueError:
+            pass
+
+    if dt is None:
+        raise ValueError(
+            f"Could not parse date/time from date='{date_str}', time='{time_str}'.\n"
+            "Supported formats:\n"
+            "  --date 2026-10-15 --time 07:00:00\n"
+            "  --time '2026-10-15 07:00:00'\n"
+            "  --time 07:00:00"
+        )
+
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+
+    epoch = int(dt.timestamp())
+    offset_min = int(dt.utcoffset().total_seconds() // 60)
+    return epoch, offset_min, dt.strftime("%Y-%m-%d %H:%M:%S")
 
 try:
     import serial
@@ -58,10 +125,20 @@ def format_dashboard(data: dict) -> str:
     lines.append(f"{FG_CYAN}{'=' * 72}{RESET}")
 
     # RF Link Status
+    clock_mode = clock.get("mode", "unset")
+    unix_s = clock.get("unix_s", 0)
+    if clock_mode == "simulated" and unix_s > 0:
+        local_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(unix_s))
+        clock_disp = f"{local_time_str} ({clock.get('rate', 1):.0f}x)"
+        clock_col = FG_GREEN
+    else:
+        clock_disp = "UNSET"
+        clock_col = FG_YELLOW
+
     lines.append(
         f"{BOLD}[RF LINK]{RESET} State: {link_col}{BOLD}{link_state}{RESET} | "
         f"Packets: {rf.get('rx', 0):>5} | Drops: {rf.get('drop', 0):>2} | "
-        f"Gaps: {rf.get('pkt_gap', 0):>2} | Clock: {DIM}{clock.get('mode', 'unset')}{RESET}"
+        f"Gaps: {rf.get('pkt_gap', 0):>2} | Clock: {clock_col}{clock_disp}{RESET}"
     )
     lines.append(f"{DIM}{'-' * 72}{RESET}")
 
@@ -159,9 +236,52 @@ def main():
     parser.add_argument("--port", default="COM5", help="Serial port (default: COM5)")
     parser.add_argument("--baud", type=int, default=115200, help="Baud rate (default: 115200)")
     parser.add_argument(
-        "--rate", type=float, default=4.0, help="Screen refresh rate in Hz (default: 4.0)"
+        "--fps", type=float, default=10.0, help="Screen refresh rate in Hz (default: 10.0)"
+    )
+    parser.add_argument(
+        "--date", default=None,
+        help="Start date (Year-Month-Day), e.g. '2026-10-15' or '15-10-2026' (default: today)"
+    )
+    parser.add_argument(
+        "--time", default="now",
+        help="Start time (HH:MM:SS) or full datetime, e.g. '07:00:00' or '2026-10-15 07:00:00' or 'now' (default: 'now')"
+    )
+    parser.add_argument(
+        "--rate", type=int, default=1,
+        help="Time passing speed multiplier, e.g. 1 = real-time, 10 = 10x (10s in 1s), 60 = 60x (1 min in 1s) (default: 1)"
+    )
+    parser.add_argument(
+        "--no-clock", action="store_true",
+        help="Do not initialize or alter the Base Station clock"
+    )
+    parser.add_argument(
+        "inputs", nargs="*",
+        help="Quick smart inputs: time (07:00:00), date (2026-10-15), rate (10 or 10x), or port (COM5) in any order"
     )
     args = parser.parse_args()
+
+    # Smart positional argument resolver
+    for item in args.inputs:
+        val = item.strip()
+        if not val:
+            continue
+        lower = val.lower()
+        if lower.startswith("com") and (len(lower) == 3 or lower[3:].isdigit()):
+            args.port = val.upper()
+        elif lower.endswith("x") and lower[:-1].isdigit():
+            args.rate = int(lower[:-1])
+        elif val.isdigit():
+            args.rate = int(val)
+        elif ":" in val and " " not in val:
+            args.time = val
+        elif ("-" in val or "/" in val) and " " not in val:
+            args.date = val
+        elif " " in val:
+            args.time = val
+        elif lower == "now":
+            args.time = "now"
+        elif lower == "today":
+            args.date = "today"
 
     print(f"Opening {args.port} at {args.baud} baud...")
     try:
@@ -170,10 +290,22 @@ def main():
         print(f"Error opening {args.port}: {exc}", file=sys.stderr)
         return 1
 
-    min_interval = 1.0 / max(1.0, args.rate)
+    min_interval = 1.0 / max(1.0, args.fps)
     last_render = 0.0
 
-    print("Connected! Waiting for telemetry stream...")
+    if not args.no_clock:
+        try:
+            epoch, offset_minutes, display_time = parse_clock_inputs(args.date, args.time)
+            clock_cmd = f"SIM_CLOCK,{epoch},{offset_minutes},{args.rate}\n"
+            print(f"Initializing Base Station clock to: {display_time} ({args.rate}x speed)...")
+            time.sleep(0.3)
+            ser.write(clock_cmd.encode("ascii"))
+            ser.flush()
+        except Exception as exc:
+            print(f"[WARN] Could not set clock: {exc}", file=sys.stderr)
+
+    print("Connected! Streaming telemetry...")
+
     try:
         while True:
             raw = ser.readline()
