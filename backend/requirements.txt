@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+pytest
+httpx
+pyserial
+scikit-learn>=1.2,<2

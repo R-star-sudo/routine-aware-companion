@@ -61,6 +61,12 @@ cover/
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
+/backend/data/telemetry.csv
+/backend/data/hardware_telemetry.csv
+/backend/data/real_context/
+/backend/data/prepared_real/
+/backend/data/synthetic_datasets/
+/backend/data/model_evaluation/
 
 # Flask stuff:
 instance/
