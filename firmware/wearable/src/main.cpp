@@ -1,24 +1,30 @@
 /**
  * @file main.cpp
- * @brief Wearable ESP32 Node - Sensor Data Collection (Step 1)
+ * @brief Wearable ESP32 Node - Sensor Collection & ESP-NOW Transmission (Step 2)
  * @project Routine-Aware Companion - Hacktivate 2026
  *
- * This firmware initializes the hardware sensors on the wearable node,
- * reads telemetry in a non-blocking loop, and prints structured records
- * to the Serial monitor every 500ms for hardware verification.
+ * This firmware:
+ *   1. Initializes hardware sensors: MPU6050 (I2C), MAX30102 (I2C), DS18B20 (1-Wire).
+ *   2. Samples biometrics and inertial telemetry using non-blocking schedules.
+ *   3. Packages data into a packed, validated C-struct (magic header + XOR checksum).
+ *   4. Broadcasts telemetry packets over ESP-NOW on fixed Channel 1 every 100ms (10 Hz).
+ *   5. Outputs summary status to the Serial monitor for live debugging.
  *
  * Hardware Connections:
- *   - I2C Bus (Shared):
+ *   - Shared I2C Bus:
  *       SDA -> GPIO 21
  *       SCL -> GPIO 22
  *       Devices: MPU6050 (0x68), MAX30102 (0x57)
  *   - 1-Wire Bus:
- *       DATA -> GPIO 4 (requires 4.7k pull-up resistor to 3.3V)
+ *       DATA -> GPIO 4 (with 4.7k pull-up resistor to 3.3V)
  *       Device: DS18B20
  */
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <WiFi.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <MAX30105.h>
@@ -27,25 +33,41 @@
 #include <DallasTemperature.h>
 
 // ============================================================================
-// Pin Definitions & Bus Configuration
+// Hardware Pin Definitions
 // ============================================================================
 #define PIN_I2C_SDA         21
 #define PIN_I2C_SCL         22
 #define PIN_ONE_WIRE_BUS    4
 
 // ============================================================================
-// Timing Constants (Non-blocking intervals)
+// RF & ESP-NOW Configuration
 // ============================================================================
-static const uint32_t SERIAL_PRINT_INTERVAL_MS = 500;  // Telemetry print frequency
-static const uint32_t DS18B20_POLL_INTERVAL_MS  = 200;  // 10-bit conversion takes ~188ms
-static const uint32_t MPU_SAMPLE_INTERVAL_MS    = 50;   // 20Hz MPU sampling
+#define ESPNOW_WIFI_CHANNEL     1
+#define PACKET_MAGIC_HEADER     0xAA55
+
+// Broadcast MAC address: all listening nodes on Channel 1 receive telemetry
+static const uint8_t BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+// ============================================================================
+// Non-blocking Timing Intervals (ms)
+// ============================================================================
+static const uint32_t TRANSMIT_INTERVAL_MS      = 100;  // 10 Hz ESP-NOW transmission rate
+static const uint32_t SERIAL_PRINT_INTERVAL_MS  = 500;  // Benchtop diagnostic print rate
+static const uint32_t DS18B20_POLL_INTERVAL_MS  = 200;  // 10-bit conversion time (~188ms)
+static const uint32_t MPU_SAMPLE_INTERVAL_MS    = 50;   // 20 Hz MPU sensor sampling
+
+// Live sensor quality and staleness timeouts (ms)
+static const uint32_t MPU_STALE_TIMEOUT_MS      = 500;  // Stale if no IMU sample in 500ms
+static const uint32_t MAX30102_STALE_TIMEOUT_MS = 1000; // Stale if no FIFO sample in 1000ms
+static const uint32_t DS18B20_STALE_TIMEOUT_MS  = 1500; // Stale if no temperature reading in 1500ms
 
 // ============================================================================
 // Telemetry Data Structure
-// Packed byte-aligned for direct future transmission over ESP-NOW in Step 2.
+// Packed byte-aligned with header verification and checksum.
 // ============================================================================
 #pragma pack(push, 1)
 struct SensorData {
+    uint16_t magic;            // 0xAA55: Frame sync / protocol identifier
     uint32_t packet_id;        // Monotonically increasing packet counter
     uint32_t timestamp_ms;     // Local node uptime in milliseconds
 
@@ -69,6 +91,9 @@ struct SensorData {
     bool mpu_ok;
     bool max_ok;
     bool ds_ok;
+
+    // Integrity Checksum
+    uint8_t checksum;          // XOR checksum across all preceding bytes
 };
 #pragma pack(pop)
 
@@ -83,11 +108,27 @@ DallasTemperature dallasSensors(&oneWire);
 // Active telemetry structure
 SensorData currentTelemetry = {0};
 
+// Hardware initialization flags
+bool mpuInitialized = false;
+bool maxInitialized = false;
+bool dsInitialized  = false;
+
+// Live data quality timestamps
+uint32_t lastMpuSuccessTime = 0;
+uint32_t lastMaxSampleTime  = 0;
+uint32_t lastDsSuccessTime  = 0;
+
 // Non-blocking loop timers
+uint32_t lastTransmitTime = 0;
 uint32_t lastPrintTime = 0;
 uint32_t lastMpuSampleTime = 0;
 uint32_t lastDsRequestTime = 0;
 bool dsConversionPending = false;
+
+// Transmission statistics
+volatile uint32_t totalPacketsSent = 0;
+volatile uint32_t totalPacketsFailed = 0;
+volatile bool lastTxSuccess = true;
 
 // Heart Rate calculation state
 static const byte RATE_SIZE = 4;
@@ -100,14 +141,49 @@ float currentBpm = 0.0f;
 static const uint32_t IR_FINGER_THRESHOLD = 50000;
 
 // ============================================================================
+// Checksum Calculation Routine
+// ============================================================================
+/**
+ * @brief Computes an 8-bit XOR checksum over all fields preceding the checksum byte.
+ */
+uint8_t calculateChecksum(const SensorData &data) {
+    const uint8_t *bytePtr = (const uint8_t *)&data;
+    size_t length = sizeof(SensorData) - sizeof(data.checksum);
+    uint8_t chk = 0;
+    for (size_t i = 0; i < length; i++) {
+        chk ^= bytePtr[i];
+    }
+    return chk;
+}
+
+// ============================================================================
+// ESP-NOW Callbacks
+// ============================================================================
+/**
+ * @brief ESP-NOW send status callback.
+ */
+void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+    if (status == ESP_NOW_SEND_SUCCESS) {
+        totalPacketsSent++;
+        lastTxSuccess = true;
+    } else {
+        totalPacketsFailed++;
+        lastTxSuccess = false;
+    }
+}
+
+// ============================================================================
 // Non-blocking Sensor Update Routines
 // ============================================================================
 
 /**
- * @brief Reads the MPU6050 accelerometer and gyroscope at periodic intervals.
+ * @brief Reads MPU6050 at periodic intervals (20 Hz) and tracks live sensor health.
  */
 void updateMpu6050() {
-    if (!currentTelemetry.mpu_ok) return;
+    if (!mpuInitialized) {
+        currentTelemetry.mpu_ok = false;
+        return;
+    }
 
     uint32_t now = millis();
     if (now - lastMpuSampleTime >= MPU_SAMPLE_INTERVAL_MS) {
@@ -121,28 +197,40 @@ void updateMpu6050() {
             currentTelemetry.gx = g.gyro.x;
             currentTelemetry.gy = g.gyro.y;
             currentTelemetry.gz = g.gyro.z;
+            currentTelemetry.mpu_ok = true;
+            lastMpuSuccessTime = now;
+        } else {
+            currentTelemetry.mpu_ok = false;
         }
+    }
+
+    if (lastMpuSuccessTime > 0 && (now - lastMpuSuccessTime > MPU_STALE_TIMEOUT_MS)) {
+        currentTelemetry.mpu_ok = false;
     }
 }
 
 /**
- * @brief Polls the MAX30102 FIFO buffer and computes heart rate if beat detected.
- *        Called continuously in loop() to avoid buffer overflow.
+ * @brief Polls MAX30102 FIFO continuously to avoid overflow, tracks heart rate,
+ *        and reflects live data freshness.
  */
 void updateMax30102() {
-    if (!currentTelemetry.max_ok) return;
+    if (!maxInitialized) {
+        currentTelemetry.max_ok = false;
+        return;
+    }
 
-    // particleSensor.check() pulls new samples from sensor FIFO into local buffer
     particleSensor.check();
 
+    uint32_t now = millis();
     while (particleSensor.available()) {
         uint32_t irValue = particleSensor.getFIFOIR();
-        particleSensor.nextSample(); // Advance FIFO read pointer
+        particleSensor.nextSample();
 
+        lastMaxSampleTime = now;
+        currentTelemetry.max_ok = true;
         currentTelemetry.raw_ir = irValue;
 
         if (irValue < IR_FINGER_THRESHOLD) {
-            // No finger/skin contact detected
             currentTelemetry.finger_detected = false;
             currentTelemetry.heart_rate = 0.0f;
             currentBpm = 0.0f;
@@ -151,18 +239,16 @@ void updateMax30102() {
 
         currentTelemetry.finger_detected = true;
 
-        // Peak detection algorithm from SparkFun heartRate.h
         if (checkForBeat(irValue)) {
             long delta = millis() - lastBeat;
             lastBeat = millis();
 
-            if (delta > 250 && delta < 2500) { // Reasonable human BPM window (24 - 240 BPM)
+            if (delta > 250 && delta < 2500) { // Valid human pulse range (24 - 240 BPM)
                 float beatsPerMinute = 60.0f / (delta / 1000.0f);
 
                 rates[rateSpot++] = (byte)beatsPerMinute;
                 rateSpot %= RATE_SIZE;
 
-                // Compute smoothed running average
                 int beatAvg = 0;
                 int validSamples = 0;
                 for (byte x = 0; x < RATE_SIZE; x++) {
@@ -178,66 +264,101 @@ void updateMax30102() {
         }
     }
 
+    if (lastMaxSampleTime > 0 && (now - lastMaxSampleTime > MAX30102_STALE_TIMEOUT_MS)) {
+        currentTelemetry.max_ok = false;
+    }
+
     currentTelemetry.heart_rate = currentBpm;
 }
 
 /**
- * @brief Asynchronously triggers and reads temperature from the DS18B20 sensor.
- *        Uses DallasTemperature's non-blocking mode to avoid stalling the loop.
+ * @brief Asynchronously requests and collects temperature from DS18B20,
+ *        marking ds_ok true only after verified valid post-conversion readings.
  */
 void updateDs18b20() {
-    if (!currentTelemetry.ds_ok) return;
+    if (!dsInitialized) {
+        currentTelemetry.ds_ok = false;
+        return;
+    }
 
     uint32_t now = millis();
 
     if (!dsConversionPending) {
-        // Request a new temperature conversion without waiting
         dallasSensors.requestTemperatures();
         lastDsRequestTime = now;
         dsConversionPending = true;
     } else {
-        // Check if sufficient time has elapsed for 10-bit conversion (~188ms)
         if (now - lastDsRequestTime >= DS18B20_POLL_INTERVAL_MS) {
             float tempC = dallasSensors.getTempCByIndex(0);
 
-            // DEVICE_DISCONNECTED_C is -127.0f
-            if (tempC > -55.0f && tempC < 125.0f) {
+            if (tempC > -55.0f && tempC < 125.0f && tempC != DEVICE_DISCONNECTED_C) {
                 currentTelemetry.skin_temp = tempC;
+                currentTelemetry.ds_ok = true;
+                lastDsSuccessTime = now;
             } else {
-                currentTelemetry.skin_temp = -999.0f; // Invalid/Sensor read error
+                currentTelemetry.skin_temp = -999.0f;
+                currentTelemetry.ds_ok = false;
             }
 
             dsConversionPending = false;
         }
     }
+
+    if (lastDsSuccessTime > 0 && (now - lastDsSuccessTime > DS18B20_STALE_TIMEOUT_MS)) {
+        currentTelemetry.ds_ok = false;
+    }
 }
 
 /**
- * @brief Prints the formatted SensorData struct to the Serial monitor.
+ * @brief Transmits current telemetry structure via ESP-NOW broadcast.
  */
-void printTelemetry() {
-    Serial.println(F("==================== WEARABLE TELEMETRY ===================="));
-    Serial.printf("Packet ID: %u | Uptime: %lu ms\n", 
-                  currentTelemetry.packet_id, (unsigned long)currentTelemetry.timestamp_ms);
+void transmitTelemetry() {
+    currentTelemetry.magic = PACKET_MAGIC_HEADER;
+    currentTelemetry.packet_id++;
+    currentTelemetry.timestamp_ms = millis();
+    currentTelemetry.checksum = calculateChecksum(currentTelemetry);
+
+    esp_err_t result = esp_now_send(BROADCAST_MAC, (uint8_t *)&currentTelemetry, sizeof(SensorData));
+    if (result != ESP_OK) {
+        totalPacketsFailed++;
+        lastTxSuccess = false;
+    }
+}
+
+/**
+ * @brief Prints live diagnostics and RF status to Serial monitor.
+ */
+void printDiagnostics() {
+    Serial.println(F("================= WEARABLE RF & SENSOR TELEMETRY ================="));
+    Serial.printf("Packet #%u | Uptime: %lu ms | RF Channel: %d | Payload: %u bytes\n",
+                  currentTelemetry.packet_id,
+                  (unsigned long)currentTelemetry.timestamp_ms,
+                  ESPNOW_WIFI_CHANNEL,
+                  sizeof(SensorData));
+
+    Serial.printf("ESP-NOW Stats -> Sent: %lu | Failed: %lu | Status: %s\n",
+                  (unsigned long)totalPacketsSent,
+                  (unsigned long)totalPacketsFailed,
+                  lastTxSuccess ? "OK" : "ERROR");
 
     // MPU6050
     if (currentTelemetry.mpu_ok) {
-        Serial.printf("[MPU6050] Accel (m/s^2) -> X: %6.2f | Y: %6.2f | Z: %6.2f\n",
+        Serial.printf("[MPU6050] Accel (m/s^2): X: %6.2f | Y: %6.2f | Z: %6.2f\n",
                       currentTelemetry.ax, currentTelemetry.ay, currentTelemetry.az);
-        Serial.printf("          Gyro  (rad/s) -> X: %6.2f | Y: %6.2f | Z: %6.2f\n",
+        Serial.printf("          Gyro  (rad/s): X: %6.2f | Y: %6.2f | Z: %6.2f\n",
                       currentTelemetry.gx, currentTelemetry.gy, currentTelemetry.gz);
     } else {
-        Serial.println(F("[MPU6050] SENSOR ERROR / OFFLINE"));
+        Serial.println(F("[MPU6050] OFFLINE / READ FAILURE"));
     }
 
     // MAX30102
     if (currentTelemetry.max_ok) {
-        Serial.printf("[MAX30102] IR: %6u | Contact: %s | Heart Rate: %5.1f BPM\n",
+        Serial.printf("[MAX30102] IR: %6u | Contact: %s | HR: %5.1f BPM\n",
                       currentTelemetry.raw_ir,
                       currentTelemetry.finger_detected ? "YES" : "NO",
                       currentTelemetry.heart_rate);
     } else {
-        Serial.println(F("[MAX30102] SENSOR ERROR / OFFLINE"));
+        Serial.println(F("[MAX30102] OFFLINE / READ FAILURE"));
     }
 
     // DS18B20
@@ -248,109 +369,145 @@ void printTelemetry() {
             Serial.println(F("[DS18B20]  Skin Temp: READ ERROR (-127C)"));
         }
     } else {
-        Serial.println(F("[DS18B20]  SENSOR ERROR / OFFLINE"));
+        Serial.println(F("[DS18B20]  OFFLINE / READ FAILURE"));
     }
 
-    Serial.println(F("------------------------------------------------------------\n"));
+    Serial.printf("[CRC/SYNC] Magic: 0x%04X | Checksum: 0x%02X\n",
+                  currentTelemetry.magic, currentTelemetry.checksum);
+    Serial.println(F("-------------------------------------------------------------------\n"));
 }
 
 // ============================================================================
 // Setup Routine
 // ============================================================================
 void setup() {
-    // 1. Initialize Serial Port
     Serial.begin(115200);
     while (!Serial && millis() < 2500) {
-        // Short wait for native USB connection on some boards
+        // Await serial console connection
     }
 
     Serial.println(F("\n========================================================"));
     Serial.println(F(" Routine-Aware Companion - Wearable Node"));
-    Serial.println(F(" Step 1: Hardware Initialization & Sensor Data Acquisition"));
+    Serial.println(F(" Step 2: Sensor Acquisition & 10Hz ESP-NOW Transmission"));
     Serial.println(F("========================================================"));
 
-    // 2. Initialize Shared I2C Bus
-    Serial.printf("[I2C] Initializing bus on SDA: GPIO %d, SCL: GPIO %d...\n", 
+    // 1. Initialize Shared I2C Bus
+    Serial.printf("[I2C] Initializing on SDA: GPIO %d, SCL: GPIO %d...\n", 
                   PIN_I2C_SDA, PIN_I2C_SCL);
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-    Wire.setClock(400000); // 400kHz Fast Mode for low latency sensor polling
+    Wire.setClock(400000);
 
-    // 3. Initialize MPU6050
+    // 2. Initialize MPU6050
     Serial.print(F("[MPU6050] Initializing at 0x68... "));
     if (mpu.begin(0x68, &Wire)) {
-        currentTelemetry.mpu_ok = true;
+        mpuInitialized = true;
+        currentTelemetry.mpu_ok = false; // Validated on first live sample
         mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
         mpu.setGyroRange(MPU6050_RANGE_500_DEG);
         mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-        Serial.println(F("OK (Configured: +/-4G, 500 deg/s, 21Hz DLPF)"));
+        Serial.println(F("OK"));
     } else {
+        mpuInitialized = false;
         currentTelemetry.mpu_ok = false;
-        Serial.println(F("FAILED! Check VCC, GND, SDA (21), SCL (22)"));
+        Serial.println(F("FAILED! Check wiring."));
     }
 
-    // 4. Initialize MAX30102
+    // 3. Initialize MAX30102
     Serial.print(F("[MAX30102] Initializing at 0x57... "));
     if (particleSensor.begin(Wire, I2C_SPEED_FAST)) {
-        currentTelemetry.max_ok = true;
-
-        // Configure sensor for Heart Rate mode
-        byte ledBrightness = 60; // 0=Off to 255=50mA
-        byte sampleAverage = 4;  // Options: 1, 2, 4, 8, 16, 32
-        byte ledMode = 2;        // 2 = Red + IR (SpO2 / HR mode)
-        int sampleRate = 200;    // Options: 50, 100, 200, 400, 800, 1000, 1600, 3200
-        int pulseWidth = 411;    // Options: 69, 118, 215, 411 (microseconds)
-        int adcRange = 4096;     // Options: 2048, 4096, 8192, 16384
-
-        particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
-        particleSensor.setPulseAmplitudeRed(0x0A); // Low Red LED to conserve power
-        particleSensor.setPulseAmplitudeGreen(0);  // Green off
-        Serial.println(F("OK (Configured: Red+IR, 200Hz, 4x Avg)"));
+        maxInitialized = true;
+        currentTelemetry.max_ok = false; // Validated on first live sample
+        particleSensor.setup(60, 4, 2, 200, 411, 4096);
+        particleSensor.setPulseAmplitudeRed(0x0A);
+        particleSensor.setPulseAmplitudeGreen(0);
+        Serial.println(F("OK"));
     } else {
+        maxInitialized = false;
         currentTelemetry.max_ok = false;
-        Serial.println(F("FAILED! Check VCC, GND, and pull-ups"));
+        Serial.println(F("FAILED! Check wiring."));
     }
 
-    // 5. Initialize DS18B20 (1-Wire)
-    Serial.printf("[DS18B20] Initializing on 1-Wire (GPIO %d)... ", PIN_ONE_WIRE_BUS);
+    // 4. Initialize DS18B20 (1-Wire)
+    Serial.printf("[DS18B20] Initializing on GPIO %d... ", PIN_ONE_WIRE_BUS);
+    currentTelemetry.skin_temp = -999.0f;
+    currentTelemetry.ds_ok = false; // Validated on first completed conversion
     dallasSensors.begin();
-    int deviceCount = dallasSensors.getDeviceCount();
-    if (deviceCount > 0) {
-        currentTelemetry.ds_ok = true;
-        // Non-blocking mode: do not block execution while waiting for temperature conversion
+    if (dallasSensors.getDeviceCount() > 0) {
+        dsInitialized = true;
         dallasSensors.setWaitForConversion(false);
-        // 10-bit resolution -> 0.25 C precision with ~188ms conversion time
-        dallasSensors.setResolution(10);
+        dallasSensors.setResolution(10); // 10-bit resolution (~188ms)
         dallasSensors.requestTemperatures();
         dsConversionPending = true;
         lastDsRequestTime = millis();
-        Serial.printf("OK (%d device(s) found, 10-bit non-blocking)\n", deviceCount);
+        Serial.println(F("OK (10-bit non-blocking, awaiting first sample)"));
     } else {
-        currentTelemetry.ds_ok = false;
-        Serial.println(F("FAILED! No 1-Wire devices found. Verify 4.7k pull-up resistor to 3.3V"));
+        dsInitialized = false;
+        Serial.println(F("FAILED! Verify 4.7k pull-up resistor."));
+    }
+
+    // 5. Initialize Wi-Fi in Station Mode for ESP-NOW
+    Serial.println(F("[RF] Configuring Wi-Fi Station Mode for ESP-NOW..."));
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+
+    // Lock Wi-Fi radio to Channel 1
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_channel(ESPNOW_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_promiscuous(false);
+
+    Serial.printf("[RF] MAC Address: %s | Locked Channel: %d\n",
+                  WiFi.macAddress().c_str(), ESPNOW_WIFI_CHANNEL);
+
+    // 6. Initialize ESP-NOW Protocol
+    Serial.print(F("[ESP-NOW] Initializing protocol... "));
+    if (esp_now_init() == ESP_OK) {
+        Serial.println(F("OK"));
+    } else {
+        Serial.println(F("FAILED! Rebooting..."));
+        delay(3000);
+        ESP.restart();
+    }
+
+    // Register transmission status callback
+    esp_now_register_send_cb(onDataSent);
+
+    // 7. Register Broadcast Peer
+    Serial.print(F("[ESP-NOW] Registering broadcast peer (FF:FF:FF:FF:FF:FF)... "));
+    esp_now_peer_info_t peerInfo = {};
+    memcpy(peerInfo.peer_addr, BROADCAST_MAC, 6);
+    peerInfo.channel = ESPNOW_WIFI_CHANNEL;
+    peerInfo.encrypt = false;
+
+    if (esp_now_add_peer(&peerInfo) == ESP_OK) {
+        Serial.println(F("OK"));
+    } else {
+        Serial.println(F("FAILED to register peer!"));
     }
 
     Serial.println(F("========================================================\n"));
-    Serial.println(F("Starting telemetry collection loop...\n"));
+    Serial.println(F("Wearable node active: Transmitting telemetry at 10 Hz...\n"));
 }
 
 // ============================================================================
 // Main Execution Loop
 // ============================================================================
 void loop() {
-    // 1. High-frequency sensor polling
-    updateMax30102(); // Pulls FIFO samples continuously to prevent overflow
-    updateMpu6050();   // 20Hz MPU sampling
+    // 1. High-frequency sensor servicing
+    updateMax30102(); // Continuous FIFO drain
+    updateMpu6050();   // 20 Hz inertial sampling
     updateDs18b20();   // Non-blocking temperature conversion
 
-    // 2. Periodic serial print every 500ms
     uint32_t currentMillis = millis();
+
+    // 2. Transmit ESP-NOW telemetry packet every 100ms (10 Hz)
+    if (currentMillis - lastTransmitTime >= TRANSMIT_INTERVAL_MS) {
+        lastTransmitTime = currentMillis;
+        transmitTelemetry();
+    }
+
+    // 3. Print benchtop diagnostics to Serial every 500ms
     if (currentMillis - lastPrintTime >= SERIAL_PRINT_INTERVAL_MS) {
         lastPrintTime = currentMillis;
-
-        // Stamp and advance packet count
-        currentTelemetry.packet_id++;
-        currentTelemetry.timestamp_ms = currentMillis;
-
-        printTelemetry();
+        printDiagnostics();
     }
 }
