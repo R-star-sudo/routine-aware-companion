@@ -41,7 +41,8 @@ def main():
     parser = argparse.ArgumentParser(description="Base Station LED & Sensor Test Tool")
     parser.add_argument("--port", default="COM5", help="Serial port (default: COM5)")
     parser.add_argument("--baud", type=int, default=115200, help="Baud rate (default: 115200)")
-    parser.add_argument("--action", choices=["all_on", "all_off", "sweep", "individual"], default="all_on",
+    parser.add_argument("inputs", nargs="*", help="LED name and state (e.g. 'caretaker on', 'morning off', 'sweep', 'all_on')")
+    parser.add_argument("--action", choices=["all_on", "all_off", "sweep", "individual"], default=None,
                         help="Action to perform: all_on, all_off, sweep, individual")
     args = parser.parse_args()
 
@@ -75,14 +76,65 @@ def main():
     time.sleep(0.2)
     ser.reset_input_buffer()
 
-    if args.action == "sweep":
+    tokens = [t.strip().upper() for t in args.inputs if t.strip()]
+    if args.action:
+        tokens.insert(0, args.action.upper())
+
+    if not tokens:
+        tokens = ["ALL_ON"]
+
+    first = tokens[0]
+    second = tokens[1] if len(tokens) > 1 else None
+
+    name_map = {
+        "CARETAKER": "CARETAKER",
+        "RED": "CARETAKER",
+        "MORNING": "MORNING",
+        "AFTERNOON": "AFTERNOON",
+        "NIGHT": "NIGHT",
+        "WC": "PATH_WC",
+        "PATH_WC": "PATH_WC",
+        "KITCHEN": "PATH_KIT",
+        "KIT": "PATH_KIT",
+        "PATH_KIT": "PATH_KIT",
+        "STATUS": "STATUS",
+    }
+
+    target_name = None
+    target_state = "ON"
+
+    if first in ("SWEEP", "TEST"):
+        action = "sweep"
+    elif first in ("ALL_ON", "ALL-ON") or (first == "ALL" and second in (None, "ON")):
+        action = "all_on"
+    elif first in ("ALL_OFF", "ALL-OFF") or (first == "ALL" and second == "OFF"):
+        action = "all_off"
+    elif first in ("INDIVIDUAL", "EACH"):
+        action = "individual"
+    else:
+        action = "single"
+        if "_" in first and first.rsplit("_", 1)[1] in ("ON", "OFF"):
+            base_name, state = first.rsplit("_", 1)
+            target_name = name_map.get(base_name, base_name)
+            target_state = state
+        else:
+            target_name = name_map.get(first, first)
+            target_state = second if second in ("ON", "OFF") else "ON"
+
+    if action == "single":
+        print(f"\n=== Setting LED {target_name} to {target_state} ===")
+        send_cmd(ser, f"LED,{target_name},{target_state}")
+        wait_for_ack(ser, f"ACK,LED,{target_name},{target_state}", timeout=2.0)
+        print(f"Command complete: LED,{target_name},{target_state}")
+
+    elif action == "sweep":
         print("\n=== Running Sequential LED Test Sweep (Blinking all 7 LEDs) ===")
         print("Pins tested: Morning(16), Afternoon(17), Night(18), Caretaker(19), WC(23), Kitchen(27), Status(25)")
         send_cmd(ser, "LED,TEST")
         wait_for_ack(ser, "ACK,LED,TEST", timeout=4.0)
         print("\nSweep complete!")
 
-    elif args.action == "all_on":
+    elif action == "all_on":
         print("\n=== Turning ALL 7 LEDs ON ===")
         print("Driving HIGH: Morning(16), Afternoon(17), Night(18), Caretaker(19), WC(23), Kitchen(27), Status(25)")
         send_cmd(ser, "LED,ALL,ON")
@@ -97,12 +149,12 @@ def main():
         wait_for_ack(ser, "ACK,LED,ALL,OFF", timeout=2.0)
         print("Turned all LEDs OFF.")
 
-    elif args.action == "all_off":
+    elif action == "all_off":
         print("\n=== Turning ALL 7 LEDs OFF ===")
         send_cmd(ser, "LED,ALL,OFF")
         wait_for_ack(ser, "ACK,LED,ALL,OFF", timeout=2.0)
 
-    elif args.action == "individual":
+    elif action == "individual":
         leds = [
             ("MORNING", "GPIO 16 (Green/Morning pill reminder)"),
             ("AFTERNOON", "GPIO 17 (Green/Afternoon pill reminder)"),

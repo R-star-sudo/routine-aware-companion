@@ -149,14 +149,27 @@ def format_dashboard(data: dict) -> str:
         f"{BOLD}{FG_YELLOW}[1] WEARABLE NODE{RESET} {DIM}(ESP-NOW Broadcast @ 10 Hz){RESET} "
         f"Pkt #{w.get('pkt', 0)} | Uptime: {w.get('ts', 0) // 1000}s"
     )
+    ax = w.get("ax")
+    ay = w.get("ay")
+    az = w.get("az")
+    gx = w.get("gx")
+    gy = w.get("gy")
+    gz = w.get("gz")
+    ax_str = f"{ax:+7.2f}" if ax is not None else "   --  "
+    ay_str = f"{ay:+7.2f}" if ay is not None else "   --  "
+    az_str = f"{az:+7.2f}" if az is not None else "   --  "
+    gx_str = f"{gx:+7.2f}" if gx is not None else "   --  "
+    gy_str = f"{gy:+7.2f}" if gy is not None else "   --  "
+    gz_str = f"{gz:+7.2f}" if gz is not None else "   --  "
+
     lines.append(
         f"    {BOLD}Motion (MPU6050) [{mpu_col}{'OK' if mpu_ok else 'FAIL'}{RESET}]:\n"
-        f"      Accel (m/s²):  X: {FG_WHITE}{w.get('ax', 0.0):+7.2f}{RESET}  "
-        f"Y: {FG_WHITE}{w.get('ay', 0.0):+7.2f}{RESET}  "
-        f"Z: {FG_WHITE}{w.get('az', 0.0):+7.2f}{RESET}\n"
-        f"      Gyro (rad/s):  X: {DIM}{w.get('gx', 0.0):+7.2f}{RESET}  "
-        f"Y: {DIM}{w.get('gy', 0.0):+7.2f}{RESET}  "
-        f"Z: {DIM}{w.get('gz', 0.0):+7.2f}{RESET}"
+        f"      Accel (m/s²):  X: {FG_WHITE}{ax_str}{RESET}  "
+        f"Y: {FG_WHITE}{ay_str}{RESET}  "
+        f"Z: {FG_WHITE}{az_str}{RESET}\n"
+        f"      Gyro (rad/s):  X: {DIM}{gx_str}{RESET}  "
+        f"Y: {DIM}{gy_str}{RESET}  "
+        f"Z: {DIM}{gz_str}{RESET}"
     )
 
     skin_t = w.get("skin_t")
