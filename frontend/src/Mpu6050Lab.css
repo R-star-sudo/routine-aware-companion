@@ -23,7 +23,12 @@
 .mpu6050-lab .lab-port-warning b { color: #65522d; }
 .mpu6050-lab .lab-error { color: #9b4c50; background: #fff1f1; }
 .mpu6050-lab .lab-warning { color: #756443; background: #fff9ec; }
-.mpu6050-lab .lab-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 9px; }
+.mpu6050-lab .lab-source-toggle { display: flex; gap: 0; border: 1px solid #e2e8ef; border-radius: 6px; overflow: hidden; flex: none; }
+.mpu6050-lab .lab-source-btn { padding: 6px 10px; border: none; background: #f6f8fb; color: #6f7f90; font-size: 8px; font-weight: 700; letter-spacing: .3px; cursor: pointer; transition: .15s ease; }
+.mpu6050-lab .lab-source-btn:hover:not(:disabled) { background: #edf1f7; }
+.mpu6050-lab .lab-source-btn.active { color: #fff; background: #397de0; cursor: default; }
+.mpu6050-lab .lab-source-btn:disabled:not(.active) { opacity: .5; cursor: not-allowed; }
+.mpu6050-lab .lab-stats { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 9px; }
 .mpu6050-lab .lab-stats > div { min-width: 0; padding: 12px 13px; border: 1px solid #e9eef4; border-radius: 8px; background: #fff; }
 .mpu6050-lab .lab-stats small, .mpu6050-lab .lab-stats b { display: block; }
 .mpu6050-lab .lab-stats small { color: #8c99a9; font-size: 7px; font-weight: 700; letter-spacing: .8px; }

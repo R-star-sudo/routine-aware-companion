@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from numbers import Real
 from pathlib import Path
 from typing import TextIO
@@ -178,9 +178,14 @@ def normalize_base_station_record(record: dict[str, object]) -> dict[str, object
     ):
         raise ValueError("base-station record has an invalid clock or packet sequence")
 
-    timestamp = datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat().replace(
-        "+00:00", "Z"
-    )
+    # Use clock.utc_offset_min from the base station if present, else system local timezone
+    # so timestamps match the simulation time the user configured.
+    offset_min = clock.get("utc_offset_min")
+    if isinstance(offset_min, (int, float)) and -840 <= offset_min <= 840:
+        tz: tzinfo = timezone(timedelta(minutes=int(offset_min)))
+    else:
+        tz = datetime.now().astimezone().tzinfo or timezone.utc
+    timestamp = datetime.fromtimestamp(epoch, tz=tz).isoformat()
     mpu_valid = wearable.get("mpu_ok") is True
     max_valid = wearable.get("max_ok") is True
     ds_valid = wearable.get("ds_ok") is True

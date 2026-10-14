@@ -78,7 +78,7 @@ function App() {
 
   // Continuous live polling every 2 seconds when in LIVE mode
   useEffect(() => {
-    if (mode !== "LIVE") return;
+    if (mode !== "LIVE" || page === "MPU6050 Lab") return;
     const pollTimer = window.setInterval(async () => {
       try {
         const liveData = await loadLiveData();
@@ -90,7 +90,7 @@ function App() {
       }
     }, 2000);
     return () => window.clearInterval(pollTimer);
-  }, [mode]);
+  }, [mode, page]);
 
   useEffect(() => {
     try {
@@ -345,12 +345,12 @@ function App() {
           <div className="page-heading">
             <div><div className="eyebrow">ROUTINE-AWARE COMPANION <span className="eyebrow-line" /></div><h1>{page}</h1><p>{pageDescription(page)}</p></div>
             <div className="heading-actions">
-              <button
+              {page !== "MPU6050 Lab" && <button
                 className="button button-secondary"
                 onClick={downloadTelemetryCsv}
                 disabled={mode === "DEMO" || data.observations.length === 0 || loading || (mode === "LIVE" && !liveAvailable)}
                 title={mode === "LIVE" ? "Download the live telemetry records currently loaded in the dashboard (up to 500)." : "Download the imported telemetry observations as CSV."}
-              ><Download size={15} />Download CSV</button>
+              ><Download size={15} />Download CSV</button>}
               {page !== "Settings" && page !== "MPU6050 Lab" && <button className="button button-secondary" onClick={() => void refresh()} disabled={loading}><RefreshCw size={15} className={loading ? "spin" : ""} />{loading ? "Syncing" : "Refresh"}</button>}
               {page !== "Settings" && page !== "MPU6050 Lab" && <button className="date-chip" onClick={() => setPage("Predictive Calendar")}><CalendarDays size={16} />{formatDate(selectedDate)}<ChevronRight size={14} /></button>}
             </div>
@@ -379,7 +379,7 @@ function App() {
             }
             catch (error) { setSourceError(error instanceof Error ? error.message : "Could not clear local observations."); }
           }} />}
-          <footer className="footer"><span>{page === "MPU6050 Lab" ? "MPU6050 Lab · Separate browser serial capture" : <>Routine-Aware Companion <b>·</b> {mode === "DEMO" ? "Demonstration workspace" : mode === "CSV" ? "Browser-local records" : "Live telemetry API"}</>}</span><span>Observations are not diagnoses. Pillbox interaction does not confirm medication use.</span></footer>
+          <footer className="footer"><span>{page === "MPU6050 Lab" ? "MPU6050 Lab · Telemetry API (auto) or browser serial" : <>Routine-Aware Companion <b>·</b> {mode === "DEMO" ? "Demonstration workspace" : mode === "CSV" ? "Browser-local records" : "Live telemetry API"}</>}</span><span>Observations are not diagnoses. Pillbox interaction does not confirm medication use.</span></footer>
         </div>
       </main>
     </div>
