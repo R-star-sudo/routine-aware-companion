@@ -2,6 +2,7 @@
 
 ## Current milestone
 
+<<<<<<< HEAD
 Implemented software supports synthetic telemetry and laptop-side CSV logging
 through one local FastAPI service. The data contract is versioned as `1.0`.
 The separate `backend/app/dataset_generator.py` creates deterministic
@@ -21,6 +22,21 @@ Wearable sensors
   -> CSV storage
   -> future React caregiver dashboard
 ```
+=======
+This document describes the intended system architecture. Current implementation status:
+
+- **Firmware (`firmware/`)**: **Implemented**. Both the Wearable and Base Station ESP32 firmware nodes are implemented, configured with PlatformIO (`espressif32@6.5.0`), and ready for deployment.
+- **Laptop Pipeline & Applications (`backend/`, `frontend/`)**: **Planned**. The serial data collection pipeline, FastAPI backend, SQLite database, React dashboard, and predictive routine services are scheduled for subsequent implementation steps.
+
+## Components
+
+- **Wearable (`firmware/wearable/`, implemented)**: ESP32-based wearable sensor node. Collects inertial motion (MPU6050 over I2C), heart rate / IR proximity (MAX30102 over I2C), and peripheral skin temperature (DS18B20 over 1-Wire). Includes live sensor health and staleness tracking (`mpu_ok`, `max_ok`, `ds_ok`). Broadcasts packed, byte-aligned telemetry (`SensorData` struct with `0xAA55` magic header and 8-bit XOR checksum) over ESP-NOW on fixed Wi-Fi Channel 1 at 10 Hz (100ms interval).
+- **Base station (`firmware/base_station/`, implemented)**: ESP32-based local hub. Receives wearable ESP-NOW packets via a thread-safe FreeRTOS queue bridging the Core 0 Wi-Fi stack to the Core 1 main loop. Monitors RF statistics, packet drop accounting, sequence gaps, and transmitter reboot events. Reads local ambient temperature/humidity (DHT11 on GPIO 4) and pillbox status (Hall effect sensor on GPIO 5). Emits unified single-line JSON records over USB Serial at 115200 baud for laptop logging. Critical functions (pathway lighting, fallback reminders) are designed to function autonomously without internet access.
+- **Backend (`backend/`, planned)**: A Python and FastAPI service. Its API layer will expose application operations, schemas will define and validate data contracts, services will hold application logic, core will contain shared configuration and cross-cutting concerns, and db will manage persistence.
+- **Frontend (`frontend/`, planned)**: A React, TypeScript, and Vite application for older adults and caregivers to interact with the system, review information, and manage settings.
+- **Database (`backend/app/db/`, planned)**: Persistence will start with SQLite. Data access and schema choices should allow a future move to PostgreSQL without coupling application logic unnecessarily to SQLite.
+- **Predictive services (`backend/app/services/`, planned)**: Services may learn an individual's usual routine and identify deviations for reminder and caregiver workflows. They must distinguish observations from predictions and confirmed actions, account for missing or poor-quality readings, and avoid medical diagnoses or claims that sensor data proves a medical condition or action.
+>>>>>>> 913503692b1d26c6fb28516d01a236cbd1b3f411
 
 The simulator emits the same NDJSON record format expected from the future
 base-station serial interface. The collector accepts stdin for hardware-free
@@ -30,9 +46,13 @@ reports malformed input and request failures. The API validates the complete
 telemetry schema before appending it to CSV. Latest/history endpoints expose
 stored records to future visualization clients.
 
+<<<<<<< HEAD
 CSV is a local prototype store, not a multi-user database. Its location is
 configurable using `TELEMETRY_CSV_PATH`; the default is
 `backend/data/telemetry.csv`, which is excluded from Git.
+=======
+Sensor readings are observations, not confirmed medical facts. Changes should be described relative to the individual's usual baseline. Skin temperature is not core body temperature, and opening a medication container does not establish that medication was taken. Important events should be logged, and safe local behavior should not depend on internet availability.
+>>>>>>> 913503692b1d26c6fb28516d01a236cbd1b3f411
 
 The routine dataset generator is a distinct offline tool. It writes a flat CSV
 to `backend/data/synthetic_datasets/routine_dataset.csv` by default and uses
@@ -43,6 +63,7 @@ per-profile-day scenario probability of 0.15, UTC, and start date
 divide evenly into 24 hours, fixed-offset timezones, output path, and room
 comfort bounds. Its output directory is ignored by Git.
 
+<<<<<<< HEAD
 The dataset is grouped into identity, telemetry, `feature_*`, `label_*`, and
 `metadata_*` columns. Features are computed only from current/past observations
 or clock/routine context. Scenario flags and event timestamps in
@@ -166,3 +187,11 @@ Sensor readings are observations, not confirmed medical facts. The system
 should describe changes as deviations from an individual's usual baseline,
 not generate diagnoses, and distinguish observations, predictions, and
 confirmed actions.
+=======
+- `firmware/wearable/`: PlatformIO project for wearable telemetry transmitter.
+- `firmware/base_station/`: PlatformIO project for base station receiver and USB serial bridge.
+- `backend/`: Placeholder structure for upcoming FastAPI services and routine models.
+- `frontend/`: Placeholder structure for upcoming React/Vite dashboard.
+- `docs/`: System documentation and architecture specifications.
+
+>>>>>>> 913503692b1d26c6fb28516d01a236cbd1b3f411
