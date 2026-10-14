@@ -201,9 +201,9 @@ export async function loadLiveData(): Promise<DashboardData> {
       ambientTemperature: record.room_temperature_c,
       humidity: record.room_humidity_percent,
       movement: movementFromAcceleration(record),
-      pillboxState: record.pillbox_open === null ? "Unknown" : record.pillbox_open ? "Open" : "Closed",
+      pillboxState: (record.pillbox_open === null ? "Unknown" : record.pillbox_open ? "Open" : "Closed") as "Open" | "Closed" | "Unknown",
       routineState: null,
-      source: "LIVE",
+      source: "LIVE" as const,
     };
   }).sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp));
 

@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.schemas.telemetry import TelemetryRecord
 from app.services.telemetry_storage import TelemetryStorageError, TelemetryStore
@@ -11,6 +12,14 @@ logger = logging.getLogger(__name__)
 
 def create_app(storage_path: Path | None = None) -> FastAPI:
     application = FastAPI(title="Routine-Aware Companion API")
+    # The Vite dashboard runs on a different localhost port from FastAPI.
+    # Restrict browser access to local development origins.
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
+    )
     application.state.telemetry_store = TelemetryStore(storage_path)
 
     @application.get("/")

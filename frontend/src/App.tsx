@@ -48,6 +48,47 @@ function App() {
     return () => window.clearInterval(timer);
   }, []);
 
+  // Probe for LIVE telemetry API on mount and auto-connect
+  useEffect(() => {
+    let cancelled = false;
+    const probe = async () => {
+      try {
+        const liveData = await loadLiveData();
+        if (cancelled) return;
+        if (liveData.observations.length > 0) {
+          setData(liveData);
+          setMode("LIVE");
+          setLiveAvailable(true);
+          const newest = liveData.observations.at(-1);
+          if (newest) {
+            setSelectedDate(dateKey(newest.timestamp));
+            setViewMonth(new Date(newest.timestamp));
+          }
+        }
+      } catch {
+        // Fall back to DEMO mode if API is not running
+      }
+    };
+    void probe();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Continuous live polling every 2 seconds when in LIVE mode
+  useEffect(() => {
+    if (mode !== "LIVE") return;
+    const pollTimer = window.setInterval(async () => {
+      try {
+        const liveData = await loadLiveData();
+        setData(liveData);
+        setLiveAvailable(true);
+        setSourceError("");
+      } catch {
+        // Suppress transient poll errors so the UI stays stable
+      }
+    }, 2000);
+    return () => window.clearInterval(pollTimer);
+  }, [mode]);
+
   useEffect(() => {
     try {
       if (mode === "CSV") {
@@ -146,12 +187,22 @@ function App() {
     }
   };
 
-  const observationsForDate = useMemo(
-    () => data.observations.filter((item) => dateKey(item.timestamp) === selectedDate),
-    [data.observations, selectedDate],
-  );
+  const observationsForDate = useMemo(() => {
+    const forSelected = data.observations.filter((item) => dateKey(item.timestamp) === selectedDate);
+    if (forSelected.length > 0) return forSelected;
+    // In LIVE mode, if the selectedDate doesn't match (e.g. simulation date vs system date),
+    // fall back to showing the latest date available so the screen is never blank!
+    if (mode === "LIVE" && data.observations.length > 0) {
+      const latestDate = dateKey(data.observations.at(-1)!.timestamp);
+      return data.observations.filter((item) => dateKey(item.timestamp) === latestDate);
+    }
+    return [];
+  }, [data.observations, selectedDate, mode]);
+
   const forecast = data.forecasts.find((item) => item.targetDate === selectedDate);
-  const currentReading = observationsForDate.at(-1);
+  const currentReading = mode === "LIVE" && data.observations.length > 0
+    ? data.observations.at(-1)
+    : observationsForDate.at(-1);
   const dataLabel = mode === "LIVE"
     ? loading ? "CONNECTING" : sourceError || !liveAvailable ? "OFFLINE" : "LIVE"
     : mode === "CSV" ? "LOCAL CSV" : mode;
@@ -243,7 +294,19 @@ function App() {
           <button className="icon-button mobile-menu-button" aria-label="Open navigation" onClick={() => setMobileMenu(true)}><Menu size={20} /></button>
           <div className="breadcrumb">Workspace <ChevronRight size={14} /> <strong>{page}</strong></div>
           <div className="topbar-actions">
-            <div className="connection-label"><span className={`connection-dot ${mode === "LIVE" && liveAvailable && !sourceError && !loading ? "dot-green" : mode === "DEMO" ? "dot-blue" : "dot-muted"}`} />{mode === "LIVE" ? (loading ? "Checking source" : sourceError || !liveAvailable ? "Unavailable" : lastUpdated ? "Live source" : "Connected · no readings") : mode === "CSV" ? "Local data" : "Demo mode"}</div>
+            <button
+              className={`button ${mode === "LIVE" ? "button-primary" : "button-secondary"}`}
+              style={{ height: "30px", fontSize: "11px", padding: "0 10px", display: "inline-flex", alignItems: "center", gap: "6px" }}
+              title="Click to toggle between Live Hardware Telemetry and Demo Mode"
+              onClick={() => void changeMode(mode === "LIVE" ? "DEMO" : "LIVE")}
+            >
+              <span className={`connection-dot ${mode === "LIVE" && liveAvailable && !sourceError ? "dot-green" : "dot-blue"}`} style={{ display: "inline-block" }} />
+              {mode === "LIVE" ? "● LIVE STREAMING" : "DEMO MODE (Click for Live)"}
+            </button>
+            <div className="connection-label">
+              <span className={`connection-dot ${mode === "LIVE" && liveAvailable && !sourceError && !loading ? "dot-green" : mode === "DEMO" ? "dot-blue" : "dot-muted"}`} />
+              {mode === "LIVE" ? (loading ? "Checking source" : sourceError || !liveAvailable ? "Unavailable" : lastUpdated ? `${data.observations.length} records · Live` : "Connected · waiting for readings") : mode === "CSV" ? "Local data" : "Demo mode"}
+            </div>
             <span className={`mode-badge ${modeBadgeClass}`}>{dataLabel}</span>
             <span className="topbar-divider" />
             <span className="topbar-date">{mode === "LIVE" && lastUpdated ? "SIM · " : ""}{displayedDate.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}</span>
@@ -261,7 +324,7 @@ function App() {
             </div>
           </div>
 
-          {mode === "DEMO" && <div className="demo-banner"><span className="demo-banner-dot" /><strong>DEMO DATA</strong><span>Illustrative sample data only — not readings from a person or connected hardware.</span></div>}
+          {mode === "DEMO" && <div className="demo-banner"><span className="demo-banner-dot" /><strong>DEMO DATA</strong><span>Illustrative sample data only — not readings from a person or connected hardware.</span><button className="button button-primary" style={{ height: "24px", fontSize: "10px", marginLeft: "auto", padding: "0 8px" }} onClick={() => void changeMode("LIVE")}>Switch to Live Telemetry →</button></div>}
           {mode === "CSV" && <div className="csv-banner"><Upload size={15} /><strong>LOCAL CSV</strong><span>Imported observations saved in this browser. No live connection is active.</span><button onClick={() => setPage("Settings")}>Manage import <ArrowRight size={13} /></button></div>}
           {sourceError && <div className="error-banner" role="alert"><CircleAlert size={17} /><span>{sourceError}</span><button aria-label="Dismiss error" onClick={() => setSourceError("")}><X size={16} /></button></div>}
           {notice && <div className="notice-banner" role="status"><Check size={16} />{notice}</div>}

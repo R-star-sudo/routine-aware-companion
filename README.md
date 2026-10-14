@@ -1,31 +1,25 @@
 # Routine-Aware Companion
 
-<<<<<<< HEAD
-Routine-Aware Companion is a Hacktivate 2026 prototype for predictive
-assistive systems for elderly people. The first software milestone provides a
-simulated telemetry-to-CSV pipeline and an API/collector boundary for future
-hardware data.
-=======
-An assistive system in planning for elderly people that will learn individual daily routines and provide proactive reminders and caregiver alerts.
->>>>>>> 913503692b1d26c6fb28516d01a236cbd1b3f411
+Routine-Aware Companion is a Hacktivate 2026 predictive-systems prototype for
+an elderly user's routine. It combines two ESP32 firmware projects, a laptop
+collector/API, and a React dashboard. Hardware operation still needs bench
+verification.
 
 ## Current status
 
-<<<<<<< HEAD
-**Implemented:** a versioned telemetry contract, synthetic NDJSON generator,
-FastAPI ingestion/latest/history endpoints, CSV persistence, and a collector
-that reads NDJSON from standard input or an optional serial port. Separate
-tools generate synthetic routine histories and prepare raw hardware telemetry
-with schedules and annotations into a provenance-marked training dataset. The
-offline evaluator remains synthetic by default and requires explicit
-`--dataset-mode prepared-real` for prepared hardware data.
+**Implemented in code:** wearable sensor acquisition, ESP-NOW transmission,
+and double-tap event reporting; base-station ESP-NOW reception, local
+DHT11/morning Hall readings, mapped LEDs, compact JSON serial output, simulated
+clock, and serial command handling; a collector that adapts telemetry, sends
+startup parameters, and routes cached voice-cue commands to the laptop audio
+player; FastAPI ingestion/history with CSV storage; synthetic-data tools; and
+DEMO, LIVE, and local CSV dashboard modes.
 
-**Planned:** base-station ESP-NOW reception and JSON serial output, dashboard,
-verified real hardware collection and real-data model evaluation, and embedded
-inference. The existing wearable firmware only acquires sensor data and prints
-diagnostic serial output. Local predictions and essential hardware actions are
-intended to remain on the base station; the laptop pipeline is for logging,
-visualization, simulation, training, and evaluation only.
+**Still to integrate or verify:** physical sensor/radio/LED behavior, cached
+voice-file availability and playback, live data collection, and base-station
+prediction logic. The serial/action path is present, but predictive triggers
+are not implemented. Offline model training/evaluation is separate from runtime
+firmware. No live forecast is claimed by the dashboard.
 
 See [docs/architecture.md](docs/architecture.md) for architecture and the
 telemetry field definitions. See
@@ -64,15 +58,74 @@ used for serial input:
 python -m app.simulator --count 20 --interval 0.5 | python -m app.collector
 ```
 
-Use the collector with a future base-station USB serial JSON stream:
+To collect base-station telemetry, set a timezone-aware simulated start time.
+Opening the serial port may reset the ESP32; the collector waits for boot,
+sends the clock command, ignores human-readable status lines, adapts each
+telemetry packet, and posts it to the API. Replace `COM3` with the base
+station's port:
 
 ```powershell
-python -m app.collector --serial-port COM3 --baudrate 115200
+python -m app.collector --serial-port COM3 --baudrate 115200 --simulation-start "2026-10-14T07:00:00+05:30" --simulation-rate 60
 ```
 
-The serial mode requires newline-delimited JSON from the base station. Current
-wearable firmware does not yet produce that format. Collector validation
-errors and API failures are reported to standard error.
+The rate is virtual seconds per real second (1–3600). At `60`, one simulated
+day takes 24 real minutes. Hardware sampling and ESP-NOW timing remain real
+time; only the record timestamps use the simulated clock. A clock-only check
+that prints serial output without API ingestion is available with `--clock-only`.
+Hardware records are skipped when the base-station clock is unset.
+
+The collector owns the USB serial port while it runs. It can send the learned
+parameter line (`P,mu_g,sigma_g,n,p_break`) once at startup and save those
+values in Base Station flash. This stores parameters for later runtime-model
+work; the current firmware does not use them to make predictions. To try the
+serial-to-audio route, put the cached ElevenLabs clip at
+`backend/app/audio/V01.mp3`, route Windows audio to the AUX-connected speaker,
+then run:
+
+```powershell
+python -m app.collector --serial-port COM3 --speak-test V01 --audio-dir app/audio
+```
+
+The collector sends `TEST_SPEAK,V01`; the Base Station emits `SPEAK,V01`, and
+the laptop opens the matching cached MP3 with its default audio player. The
+clip is not currently included in the repository. Other Base Station serial
+commands can be sent at startup with repeatable `--base-command`, for example
+`--base-command LED,NIGHT,ON`.
+
+## Firmware
+
+Build/upload both PlatformIO projects with the PlatformIO CLI:
+
+```powershell
+pio run -d firmware/wearable
+pio run -d firmware/base_station
+pio run -d firmware/wearable -t upload
+pio run -d firmware/base_station -t upload
+```
+
+The base station and wearable must use the same ESP-NOW channel and compatible
+packet layouts. The packet now includes a double-tap event sequence, so upload
+both firmware projects together. Pin assignments and hardware setup are
+documented in their source files and `docs/architecture.md`.
+
+## Frontend
+
+In another terminal, run:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open **Settings → Data source → Live dashboard API** to view collected
+observations. The default API address is `http://127.0.0.1:8000`; set
+`VITE_API_BASE_URL` in `frontend/.env.local` only if it differs. Live mode
+shows observations and leaves forecasts/events empty until those services are
+implemented. The Settings CSV import accepts backend CSV fields such as
+`pulse_rate_bpm`, `skin_temperature_c`, `room_temperature_c`,
+`room_humidity_percent`, acceleration axes, `pillbox_open`, and
+`sensor_validity`.
 
 ## Prepare real telemetry for future model work
 
@@ -204,6 +257,9 @@ move final predictive decisions or hardware actions off the base station.
 - `GET /api/v1/telemetry/history?limit=100` — retrieve newest records first;
   limit must be from 1 to 500.
 
+The dashboard reads the history endpoint directly. The API enables browser
+requests only from localhost development origins.
+
 ## Tests
 
 From the `backend` directory with the virtual environment activated:
@@ -213,25 +269,3 @@ python -m pytest
 ```
 
 Tests use temporary CSV paths and do not require physical hardware.
-=======
-The project is being developed in modular phases. **Hardware firmware for both ESP32 nodes is now implemented:**
-
-- **Wearable Firmware (`firmware/wearable/`)**: ESP32 firmware collecting 6-axis IMU (MPU6050), pulse oximetry / heart rate (MAX30102), and peripheral skin temperature (DS18B20). Features live sensor health and staleness tracking, broadcasting validated, packed telemetry packets via ESP-NOW at 10 Hz (100ms interval) on Wi-Fi Channel 1.
-- **Base Station Firmware (`firmware/base_station/`)**: ESP32 firmware receiving ESP-NOW telemetry via a FreeRTOS queue, detecting sequence gaps and node reboots, reading local ambient conditions (DHT11) and pillbox state (Hall effect sensor), and outputting unified JSON telemetry over USB Serial (115200 baud).
-
-The laptop serial ingestion pipeline, backend service, database integration, frontend dashboard, and predictive routine services are planned for subsequent steps.
-
-See [docs/architecture.md](docs/architecture.md) for full component boundaries, data protocols, and architectural status.
-
-## Firmware Setup & Build
-
-Both firmware projects are managed with PlatformIO and pinned to `espressif32@6.5.0` (Arduino-ESP32 2.0.14) for stable ESP-NOW API support:
-
-```bash
-# Build Wearable firmware
-pio run -d firmware/wearable
-
-# Build Base Station firmware
-pio run -d firmware/base_station
-```
->>>>>>> 913503692b1d26c6fb28516d01a236cbd1b3f411
