@@ -57,6 +57,7 @@ def main():
         ser.open()
     except Exception as exc:
         print(f"Error opening {args.port}: {exc}", file=sys.stderr)
+        print(f"Tip: If the Web Dashboard is currently running, {args.port} is in use by the dashboard collector window. Pause or close that window to test LEDs directly.", file=sys.stderr)
         return 1
 
     # Wait for ESP32 to send at least one telemetry line to ensure serial sync

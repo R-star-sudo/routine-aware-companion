@@ -11,6 +11,113 @@ import json
 import os
 import sys
 import time
+import urllib.request
+import urllib.error
+
+
+def api_record_to_dashboard_data(rec: dict) -> dict:
+    """Converts a FastAPI TelemetryRecord into format_dashboard structure."""
+    ts_str = rec.get("timestamp", "")
+    try:
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        unix_s = int(dt.timestamp())
+    except Exception:
+        unix_s = int(time.time())
+
+    seq = rec.get("sequence", 0)
+    validity = rec.get("sensor_validity") or {}
+    pill_open = rec.get("pillbox_open")
+    pillbox_str = "OPEN" if pill_open is True else ("CLOSED" if pill_open is False else "UNKNOWN")
+    hr = rec.get("pulse_rate_bpm")
+
+    return {
+        "src": "unified",
+        "wearable": {
+            "pkt": seq,
+            "ts": unix_s * 1000,
+            "ax": rec.get("acceleration_x_m_s2"),
+            "ay": rec.get("acceleration_y_m_s2"),
+            "az": rec.get("acceleration_z_m_s2"),
+            "gx": rec.get("angular_velocity_x_rad_s"),
+            "gy": rec.get("angular_velocity_y_rad_s"),
+            "gz": rec.get("angular_velocity_z_rad_s"),
+            "hr": hr,
+            "ir": 18000 if hr else 0,
+            "finger": hr is not None and hr > 0,
+            "skin_t": rec.get("skin_temperature_c"),
+            "mpu_ok": validity.get("mpu6050", False),
+            "max_ok": validity.get("max30102", False),
+            "ds_ok": validity.get("ds18b20", False),
+        },
+        "base": {
+            "ambient_t": rec.get("room_temperature_c"),
+            "humidity": rec.get("room_humidity_percent"),
+            "dht_ok": rec.get("room_temperature_c") is not None,
+            "ldr_raw": 0,
+            "ldr_dark": False,
+            "ldr_ok": True,
+            "pillbox": pillbox_str,
+            "leds": {
+                "morning": False,
+                "afternoon": False,
+                "night": False,
+                "caretaker": False,
+                "path_wc": 0,
+                "path_kit": 0,
+                "status": True,
+            },
+        },
+        "rf": {
+            "rx": seq,
+            "drop": 0,
+            "pkt_gap": 0,
+            "link": "OK",
+        },
+        "clock": {
+            "mode": "simulated",
+            "unix_s": unix_s,
+            "rate": 1,
+        },
+    }
+
+
+def fetch_latest_api(api_url: str = "http://127.0.0.1:8000/api/v1/telemetry/latest") -> dict | None:
+    """Fetch latest telemetry record from the local FastAPI server."""
+    try:
+        req = urllib.request.Request(api_url, headers={"User-Agent": "live_monitor"})
+        with urllib.request.urlopen(req, timeout=0.8) as resp:
+            if resp.status == 200:
+                raw = resp.read()
+                record = json.loads(raw.decode("utf-8"))
+                return api_record_to_dashboard_data(record)
+    except Exception:
+        return None
+
+
+def stream_from_api(api_url: str, fps: float) -> int:
+    """Live stream dashboard directly from FastAPI when COM port is locked by dashboard."""
+    min_interval = 1.0 / max(1.0, fps)
+    last_render = 0.0
+
+    try:
+        while True:
+            now = time.time()
+            if now - last_render < min_interval:
+                time.sleep(max(0.01, min_interval - (now - last_render)))
+                continue
+
+            data = fetch_latest_api(api_url)
+            if data is not None:
+                last_render = now
+                dashboard = format_dashboard(data)
+                sys.stdout.write(CLEAR_SCREEN + dashboard + "\n")
+                sys.stdout.flush()
+            else:
+                time.sleep(0.2)
+
+    except KeyboardInterrupt:
+        print(f"\n{FG_YELLOW}Monitor stopped.{RESET}")
+    return 0
 
 
 def parse_clock_inputs(date_str: str | None, time_str: str | None) -> tuple[int, int, str]:
@@ -268,6 +375,10 @@ def main():
         help="Do not initialize or alter the Base Station clock"
     )
     parser.add_argument(
+        "--api-url", default="http://127.0.0.1:8000/api/v1/telemetry/latest",
+        help="FastAPI endpoint to stream from if COM port is in use"
+    )
+    parser.add_argument(
         "inputs", nargs="*",
         help="Quick smart inputs: time (07:00:00), date (2026-10-15), rate (10 or 10x), or port (COM5) in any order"
     )
@@ -297,10 +408,20 @@ def main():
             args.date = "today"
 
     print(f"Opening {args.port} at {args.baud} baud...")
+    ser = None
     try:
         ser = serial.Serial(args.port, args.baud, timeout=1.0)
     except Exception as exc:
+        # Check if backend API is running and streaming
+        api_data = fetch_latest_api(args.api_url)
+        if api_data is not None:
+            print(f"\n{FG_CYAN}[INFO] {args.port} is busy (locked by Dashboard Collector).{RESET}")
+            print(f"{FG_GREEN}>> Auto-switching: streaming live telemetry from Backend API ({args.api_url})...{RESET}\n")
+            time.sleep(0.5)
+            return stream_from_api(args.api_url, args.fps)
+
         print(f"Error opening {args.port}: {exc}", file=sys.stderr)
+        print("Tip: If Dashboard is starting, wait 2 seconds or verify COM port.", file=sys.stderr)
         return 1
 
     min_interval = 1.0 / max(1.0, args.fps)
