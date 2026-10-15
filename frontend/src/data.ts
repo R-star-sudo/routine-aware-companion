@@ -43,9 +43,20 @@ export type ActivityEvent = {
   timestamp: string;
   type: string;
   description: string;
-  status: "Observed" | "Predicted" | "Demo action" | "Unavailable";
+  status: "Observed" | "Predicted" | "Demo action" | "Unavailable" | "Reminder";
   device: string;
   source: DataMode;
+  eventSource?: string;
+  decisionKind?: "model" | "rule_based";
+  reason?: string;
+  eligible?: boolean;
+  deliveryState?: string;
+  speechState?: string;
+  speechError?: string | null;
+  modelVersion?: string | null;
+  modelScore?: number | null;
+  dataQuality?: string | null;
+  dataFreshnessMinutes?: number | null;
 };
 
 export type DashboardData = {
@@ -53,6 +64,80 @@ export type DashboardData = {
   forecasts: Forecast[];
   events: ActivityEvent[];
 };
+
+type ReminderEventDto = {
+  id: string;
+  timestamp: string;
+  target: string;
+  type: string;
+  description: string;
+  reason: string;
+  eligible: boolean;
+  source: string;
+  decision_kind: "model" | "rule_based";
+  delivery_state: string;
+  speech_state: string;
+  speech_error: string | null;
+  model_version?: string | null;
+  prediction_score?: number | null;
+  data_quality?: string | null;
+  data_freshness_minutes?: number | null;
+};
+
+const apiBaseUrl = () => (import.meta.env.VITE_API_BASE_URL?.trim() || "http://127.0.0.1:8000").replace(/\/$/, "");
+
+function toActivityEvent(event: ReminderEventDto): ActivityEvent {
+  const isDemo = event.source === "simulated_demo";
+  return {
+    id: event.id,
+    timestamp: event.timestamp,
+    type: event.type,
+    description: event.reason,
+    status: event.eligible ? (event.decision_kind === "rule_based" ? "Reminder" : "Predicted") : "Unavailable",
+    device: isDemo ? "Explicit demo scenario" : "Model decision",
+    source: isDemo ? "DEMO" : "LIVE",
+    eventSource: event.source,
+    decisionKind: event.decision_kind,
+    reason: event.reason,
+    eligible: event.eligible,
+    deliveryState: event.delivery_state,
+    speechState: event.speech_state,
+    speechError: event.speech_error,
+    modelVersion: event.model_version,
+    modelScore: event.prediction_score,
+    dataQuality: event.data_quality,
+    dataFreshnessMinutes: event.data_freshness_minutes,
+  };
+}
+
+export async function loadReminderEvents(): Promise<ActivityEvent[]> {
+  const response = await fetch(`${apiBaseUrl()}/api/v1/reminders/events`);
+  if (!response.ok) throw new Error(`Reminder events returned HTTP ${response.status}.`);
+  const payload: unknown = await response.json();
+  if (!Array.isArray(payload)) throw new Error("Reminder events response was not a list.");
+  return payload.map((item) => toActivityEvent(item as ReminderEventDto));
+}
+
+export async function runDemoReminderScenario(): Promise<ActivityEvent> {
+  const response = await fetch(`${apiBaseUrl()}/api/v1/demo/scenarios`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scenario_id: "scheduled_check_in" }),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(body?.detail || `Demo scenario returned HTTP ${response.status}.`);
+  }
+  const result = await response.json() as { event: ReminderEventDto };
+  return toActivityEvent(result.event);
+}
+
+export async function updateReminderDelivery(eventId: string, state: string): Promise<void> {
+  const response = await fetch(`${apiBaseUrl()}/api/v1/reminders/events/${encodeURIComponent(eventId)}/delivery`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ state }),
+  });
+  if (!response.ok) throw new Error(`Playback status update returned HTTP ${response.status}.`);
+}
 
 export type CsvParseResult = {
   observations: Observation[];
@@ -223,7 +308,7 @@ export function createDemoData(): DashboardData {
 }
 
 export async function loadLiveData(): Promise<DashboardData> {
-  const baseUrl = import.meta.env.VITE_API_BASE_URL?.trim() || "http://127.0.0.1:8000";
+  const baseUrl = apiBaseUrl();
 
   let response: Response;
   try {
@@ -251,6 +336,9 @@ export async function loadLiveData(): Promise<DashboardData> {
       ambientTemperature: record.room_temperature_c,
       humidity: record.room_humidity_percent,
       movement: movementFromAcceleration(record),
+      pillboxState: (record.pillbox_open === null ? "Unknown" : record.pillbox_open ? "Open" : "Closed") as Observation["pillboxState"],
+      routineState: null,
+      source: "LIVE" as const,
       pillboxState: (record.pillbox_open === null ? "Unknown" : record.pillbox_open ? "Open" : "Closed") as "Open" | "Closed" | "Unknown",
       routineState: null,
       source: "LIVE" as const,
@@ -261,7 +349,7 @@ export async function loadLiveData(): Promise<DashboardData> {
   return {
     observations,
     forecasts: [],
-    events: [],
+    events: await loadReminderEvents(),
   };
 }
 

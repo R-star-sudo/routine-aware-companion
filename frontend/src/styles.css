@@ -269,3 +269,16 @@ h1 { margin: 8px 0 5px; color: #1d334c; font: 700 25px Manrope, sans-serif; lett
 @media (max-width: 740px) {
   .overview-grid.overview-content-grid, .lower-grid.overview-content-grid { grid-template-columns: 1fr; }
 }
+
+/* ElevenLabs voice prompt */
+.voice-prompt-label { display: block; margin: 2px 0 7px; color: #52677b; font-size: 9px; font-weight: 700; }
+.voice-prompt-input { display: block; width: 100%; box-sizing: border-box; resize: vertical; padding: 11px 12px; border: 1px solid #e3e9f0; border-radius: 8px; outline: none; background: #fbfcfe; color: #435a72; font: 400 11px/1.6 Inter, system-ui, sans-serif; }
+.voice-prompt-input:focus { border-color: #8fb4e8; box-shadow: 0 0 0 3px rgba(91, 143, 211, .12); }
+.voice-prompt-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; }
+.voice-prompt-footer > span { color: #9aa6b2; font-size: 8px; }
+.voice-prompt-footer .button { display: inline-flex; align-items: center; gap: 7px; }
+.voice-prompt-footer .button:disabled { cursor: not-allowed; opacity: .55; }
+.voice-status { display: flex; align-items: flex-start; gap: 6px; margin: 10px 0 0; color: #568467; font-size: 9px; line-height: 1.5; }
+.voice-status svg { flex: 0 0 auto; margin-top: 1px; }
+.voice-audio-player { display: block; width: 100%; margin-top: 12px; }
+@media (max-width: 650px) { .voice-prompt-footer { align-items: flex-start; flex-direction: column; } .voice-prompt-footer .button { width: 100%; justify-content: center; } }

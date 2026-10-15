@@ -35,5 +35,44 @@ Settings CSV import supports the backend telemetry export, including
 listed in the Settings page.
 
 Sensor records are observations, not diagnoses. A pillbox state change does
-not confirm medication was taken. Demo action controls only add a labelled
-local event and do not control hardware or generate/play audio.
+not confirm medication was taken. The LED demo action records intent only and
+does not control hardware.
+
+## ElevenLabs voice prompts
+
+The Predictions & Events page includes a **Voice companion** panel. Enter a
+short reminder and select **Generate & play**. The frontend sends the text to
+the FastAPI server, then plays the returned MP3 through the browser device's
+selected audio output. If browser autoplay is blocked, use the audio player's
+Play control.
+
+Configure the backend from the repository root:
+
+1. Copy `backend/.env.example` to `backend/.env`.
+2. Set `ELEVENLABS_API_KEY` to your ElevenLabs API key and
+   `ELEVENLABS_VOICE_ID` to the ID of the voice selected in your ElevenLabs
+   account. The default model is `eleven_multilingual_v2`.
+3. From PowerShell, install dependencies and start FastAPI:
+
+   ```powershell
+   cd backend
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   python -m pip install -r requirements.txt
+   uvicorn app.main:app --reload
+   ```
+
+4. In another terminal, start the dashboard using the frontend instructions
+   above and open **Predictions & Events → Voice companion**.
+
+The ElevenLabs key stays on the backend and is never bundled into Vite. Keep
+`backend/.env` out of Git and never place the key in a `VITE_*` variable.
+The server limits reminder text to 1,200 characters and returns generated MP3
+data without caching it. Before exposing this endpoint to a public network,
+add authentication and rate limiting to prevent unauthorized usage.
+
+**Hardware note:** this first integration plays on the device running the
+browser; it does not yet stream audio to the ESP32 base station. A physical
+ESP32 speaker needs an audio output stage (for example, an I2S amplifier and
+speaker) and a separate firmware/backend command path. The existing base
+station telemetry serial stream is not an audio transport.

@@ -5,14 +5,20 @@ import os
 import re
 import subprocess
 import sys
+feature/elevenlabs-voice
+from collections.abc import Callable, Iterable
+from datetime import datetime
+
 import time
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone, tzinfo
 from numbers import Real
 from pathlib import Path
+ main
 from typing import TextIO
 
 import httpx
+from app.services.firmware_adapter import FirmwareAdapterError, adapt_firmware_line
 
 
 def post_lines(
@@ -20,8 +26,12 @@ def post_lines(
     client: httpx.Client,
     api_url: str,
     error_stream: TextIO = sys.stderr,
+feature/elevenlabs-voice
+    transform: Callable[[str], dict[str, object] | None] | None = None,
+
     audio_directory: Path | None = None,
-) -> int:
+ main
+ int:
     errors = 0
     for line_number, line in enumerate(lines, start=1):
         stripped = line.strip()
@@ -47,6 +57,24 @@ def post_lines(
         if not stripped.startswith("{") and not (
             stripped.startswith("[") and stripped.endswith("]")
         ):
+            continue
+        if transform is not None:
+            try:
+                record = transform(line)
+            except (FirmwareAdapterError, ValueError) as exc:
+                print(f"Line {line_number}: firmware record rejected: {exc}", file=error_stream)
+                errors += 1
+                continue
+            if record is None:
+                continue
+            try:
+                response = client.post(api_url, json=record)
+                if not response.is_success:
+                    print(f"Line {line_number}: API returned {response.status_code}: {response.text}", file=error_stream)
+                    errors += 1
+            except httpx.RequestError as exc:
+                print(f"Line {line_number}: API request failed: {exc}", file=error_stream)
+                errors += 1
             continue
         try:
             record = json.loads(stripped, parse_constant=_reject_non_finite)
@@ -357,6 +385,15 @@ def main() -> int:
     parser.add_argument("--serial-port", help="Optional serial port, for example COM3")
     parser.add_argument("--baudrate", type=int, default=115200)
     parser.add_argument(
+ feature/elevenlabs-voice
+        "--firmware-base-station", action="store_true",
+        help="Adapt the current nested base-station JSON and ignore its diagnostic log lines.",
+    )
+    parser.add_argument("--device-id", help="Configured stable ID assigned to this base station.")
+    parser.add_argument(
+        "--boot-time-utc",
+        help="Timezone-aware ISO-8601 UTC instant corresponding to wearable uptime zero.",
+
         "--audio-dir",
         type=Path,
         default=Path(__file__).resolve().parent / "audio",
@@ -399,6 +436,7 @@ def main() -> int:
         "inputs",
         nargs="*",
         help="Optional smart inputs: time (06:00:00), date (2024-08-09), rate (1 or 10), or port (COM5)",
+ main
     )
     args = parser.parse_args()
 
@@ -444,6 +482,21 @@ def main() -> int:
 
     if args.baudrate < 1:
         parser.error("--baudrate must be positive")
+ feature/elevenlabs-voice
+    transform = None
+    if args.firmware_base_station:
+        if not args.device_id or not args.boot_time_utc:
+            parser.error("--firmware-base-station requires --device-id and --boot-time-utc")
+        try:
+            boot_time = datetime.fromisoformat(args.boot_time_utc.replace("Z", "+00:00"))
+            if boot_time.tzinfo is None or boot_time.utcoffset() is None:
+                raise ValueError("timezone is required")
+        except ValueError as exc:
+            parser.error(f"--boot-time-utc must be timezone-aware ISO-8601: {exc}")
+        transform = lambda line: adapt_firmware_line(
+            line, device_id=args.device_id, boot_time_utc=boot_time
+        )
+
     if args.simulation_start and not args.serial_port:
         parser.error("--simulation-start requires --serial-port")
     if args.simulation_rate is not None and not args.simulation_start:
@@ -452,6 +505,7 @@ def main() -> int:
         parser.error("--clock-only requires --serial-port and --simulation-start")
     if (args.model_parameters or args.speak_test or args.base_command) and not args.serial_port:
         parser.error("base-station commands require --serial-port")
+main
 
     simulation_rate = args.simulation_rate if args.simulation_rate is not None else 1
     startup_commands: list[str] = []
@@ -499,7 +553,11 @@ def main() -> int:
                         _read_serial_lines(serial_port),
                         client,
                         args.api_url,
+feature/elevenlabs-voice
+                        transform=transform,
+
                         audio_directory=args.audio_dir,
+ main
                     )
             else:
                 errors = post_lines(sys.stdin, client, args.api_url)

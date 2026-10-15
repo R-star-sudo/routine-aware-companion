@@ -8,6 +8,8 @@ import {
 import {
   ActivityEvent, createDemoData, DashboardData, DataMode, dateKey, formatDate,
   formatTime, Forecast, getImportedObservations, getSavedEvents, loadLiveData,
+  loadReminderEvents, Observation, parseObservationCsv, runDemoReminderScenario,
+  saveEvents, saveImportedObservations, updateReminderDelivery,
   Observation, parseObservationCsv, saveEvents, saveImportedObservations,
   serializeTelemetryCsv,
 } from "./data";
@@ -45,6 +47,13 @@ function App() {
   const [chartRange, setChartRange] = useState("24 hours");
   const [movementMetric, setMovementMetric] = useState<"movement" | "heartRate">("movement");
   const [actionBusy, setActionBusy] = useState(false);
+  const [voiceText, setVoiceText] = useState("Good morning. It is time for your morning routine. Please take a moment to get comfortable and start your day.");
+  const [voiceBusy, setVoiceBusy] = useState(false);
+  const [voiceError, setVoiceError] = useState("");
+  const [voiceNotice, setVoiceNotice] = useState("");
+  const [voiceAudioUrl, setVoiceAudioUrl] = useState<string | null>(null);
+  const [voiceEventId, setVoiceEventId] = useState<string | null>(null);
+  const [demoReminderBusy, setDemoReminderBusy] = useState(false);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 30_000);
@@ -91,6 +100,12 @@ function App() {
     }, 2000);
     return () => window.clearInterval(pollTimer);
   }, [mode, page]);
+
+  useEffect(() => {
+    return () => {
+      if (voiceAudioUrl) URL.revokeObjectURL(voiceAudioUrl);
+    };
+  }, [voiceAudioUrl]);
 
   useEffect(() => {
     try {
@@ -240,6 +255,99 @@ function App() {
     }
   };
 
+  const refreshReminderEvents = async () => {
+    const reminderEvents = await loadReminderEvents();
+    setData((current) => ({
+      ...current,
+      events: [...reminderEvents, ...current.events.filter((event) => !event.eventSource)],
+    }));
+  };
+
+  const runScheduledCheckInDemo = async () => {
+    if (demoReminderBusy) return;
+    setDemoReminderBusy(true);
+    setSourceError("");
+    try {
+      const event = await runDemoReminderScenario();
+      await refreshReminderEvents();
+      setNotice(event.eligible
+        ? "The scripted demo rule passed reminder policy. It represents no real person or sensor data."
+        : `The scripted demo reminder was suppressed: ${event.reason}`);
+    } catch (error) {
+      setSourceError(error instanceof Error ? error.message : "Could not run the reminder demo scenario.");
+    } finally {
+      setDemoReminderBusy(false);
+    }
+  };
+
+  const reportReminderDelivery = async (eventId: string | null, state: string) => {
+    if (!eventId) return;
+    try {
+      await updateReminderDelivery(eventId, state);
+      await refreshReminderEvents();
+    } catch (error) {
+      setVoiceError(error instanceof Error ? error.message : "Could not update reminder playback state.");
+    }
+  };
+
+  const speakWithElevenLabs = async (text: string, eventId?: string) => {
+    const spokenText = text.trim();
+    if (!spokenText || voiceBusy) return;
+
+    setVoiceBusy(true);
+    setVoiceError("");
+    setVoiceNotice("");
+    try {
+      const baseUrl = (import.meta.env.VITE_API_BASE_URL?.trim() || "http://127.0.0.1:8000").replace(/\/$/, "");
+      const response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/v1/voice/speech`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: spokenText, ...(eventId ? { event_id: eventId } : {}) }),
+      });
+
+      if (!response.ok) {
+        let detail = `Voice service returned HTTP ${response.status}.`;
+        try {
+          const payload: unknown = await response.json();
+          if (payload && typeof payload === "object" && "detail" in payload && typeof payload.detail === "string") {
+            detail = payload.detail;
+          }
+        } catch {
+          // Keep the HTTP status message when an error body is not JSON.
+        }
+        throw new Error(detail);
+      }
+
+      const audioBlob = await response.blob();
+      if (!audioBlob.size || !audioBlob.type.includes("audio")) {
+        throw new Error("The voice service returned an empty or unsupported audio response.");
+      }
+
+      const nextAudioUrl = URL.createObjectURL(audioBlob);
+      setVoiceAudioUrl(nextAudioUrl);
+      setVoiceEventId(eventId ?? null);
+
+      // A resolved play() only confirms the browser started playback.
+      try {
+        const player = new Audio(nextAudioUrl);
+        player.onended = () => void reportReminderDelivery(eventId ?? null, "playback_finished");
+        player.onerror = () => void reportReminderDelivery(eventId ?? null, "playback_failed");
+        await player.play();
+        await reportReminderDelivery(eventId ?? null, "playback_started");
+        setVoiceNotice("Browser playback started. Check this device's selected output and volume.");
+      } catch {
+        await reportReminderDelivery(eventId ?? null, "playback_required");
+        setVoiceNotice("Audio generated. Press Play below to start browser playback.");
+      }
+      if (eventId) await refreshReminderEvents();
+    } catch (error) {
+      setVoiceError(error instanceof Error ? error.message : "Could not generate the voice prompt.");
+      if (eventId) await refreshReminderEvents().catch(() => undefined);
+    } finally {
+      setVoiceBusy(false);
+    }
+  };
+
   const importCsv = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -366,7 +474,7 @@ function App() {
           {page === "Live Monitoring" && <MonitoringPage observations={observationsForDate} range={chartRange} setRange={setChartRange} movementMetric={movementMetric} setMovementMetric={setMovementMetric} selectedDate={selectedDate} mode={mode} onImport={() => setPage("Settings")} />}
           {page === "Routine Analytics" && <AnalyticsPage data={data} mode={mode} />}
           {page === "Medication Monitoring" && <MedicationPage data={data} observations={observationsForDate} forecast={forecast} mode={mode} />}
-          {page === "Predictions & Events" && <EventsPage events={data.events} forecasts={data.forecasts} selectedDate={selectedDate} mode={mode} onAction={recordDemoAction} actionBusy={actionBusy} />}
+          {page === "Predictions & Events" && <EventsPage events={data.events} forecasts={data.forecasts} selectedDate={selectedDate} mode={mode} onAction={recordDemoAction} actionBusy={actionBusy} onRunDemoReminder={runScheduledCheckInDemo} demoReminderBusy={demoReminderBusy} onSpeakReminder={(event) => speakWithElevenLabs("This is a simulated routine check-in reminder. It is time for the scheduled routine. Please take a moment if convenient.", event.id)} voiceBusy={voiceBusy} voiceText={voiceText} setVoiceText={setVoiceText} onSpeakPrompt={speakWithElevenLabs} voiceError={voiceError} voiceNotice={voiceNotice} voiceAudioUrl={voiceAudioUrl} onPlaybackStarted={() => void reportReminderDelivery(voiceEventId, "playback_started")} onPlaybackFinished={() => void reportReminderDelivery(voiceEventId, "playback_finished")} onPlaybackFailed={() => void reportReminderDelivery(voiceEventId, "playback_failed")} />}
           {page === "Device Health" && <DeviceHealthPage mode={mode} lastUpdated={lastUpdated} loading={loading} liveAvailable={liveAvailable} />}
           <div hidden={page !== "MPU6050 Lab"}><Mpu6050Lab active={page === "MPU6050 Lab"} /></div>
           {page === "Settings" && <SettingsPage mode={mode} onModeChange={changeMode} onImport={importCsv} onClear={() => {
@@ -729,28 +837,79 @@ function MedicationPage({ data, observations, forecast, mode }: { data: Dashboar
   </div>;
 }
 
-function EventsPage({ events, forecasts, selectedDate, mode, onAction, actionBusy }: { events: ActivityEvent[]; forecasts: Forecast[]; selectedDate: string; mode: DataMode; onAction: (type: "LED reminder command" | "Voice prompt command") => void; actionBusy: boolean }) {
+function EventsPage({ events, forecasts, selectedDate, mode, onAction, actionBusy, onRunDemoReminder, demoReminderBusy, onSpeakReminder, voiceText, setVoiceText, onSpeakPrompt, voiceBusy, voiceError, voiceNotice, voiceAudioUrl, onPlaybackStarted, onPlaybackFinished, onPlaybackFailed }: {
+  events: ActivityEvent[];
+  forecasts: Forecast[];
+  selectedDate: string;
+  mode: DataMode;
+  onAction: (type: "LED reminder command" | "Voice prompt command") => void;
+  actionBusy: boolean;
+  onRunDemoReminder: () => void;
+  demoReminderBusy: boolean;
+  onSpeakReminder: (event: ActivityEvent) => void;
+  voiceText: string;
+  setVoiceText: (value: string) => void;
+  onSpeakPrompt: (text: string) => void;
+  voiceBusy: boolean;
+  voiceError: string;
+  voiceNotice: string;
+  voiceAudioUrl: string | null;
+  onPlaybackStarted: () => void;
+  onPlaybackFinished: () => void;
+  onPlaybackFailed: () => void;
+}) {
   const selectedForecast = forecasts.find((item) => item.targetDate === selectedDate);
   return <>
-    <Panel title="Prediction and action history" subtitle="Forecasts, observations and demo commands have distinct status labels" action={<span className="status-pill status-neutral">{events.length} events</span>}>
-      {events.length ? <EventList events={events} /> : <EmptyState title="No events available" detail="The current source has not supplied a prediction or action history." />}
+    <Panel title="Prediction and action history" subtitle="The demo control runs a scripted rule, not a model or observation from a person. Each event shows its source, policy reason and delivery state." action={<button className="button button-secondary" onClick={onRunDemoReminder} disabled={demoReminderBusy}><Bell size={14} />{demoReminderBusy ? "Running scenario…" : "Run simulated reminder rule"}</button>}>
+      {events.length ? <EventList events={events} onSpeakReminder={onSpeakReminder} voiceBusy={voiceBusy} allowSpeech /> : <EmptyState title="No events available" detail="The current source has not supplied a prediction or action history." />}
     </Panel>
     <div className="overview-grid page-section">
       <Panel title="Forecast comparison" subtitle={`Target date · ${formatDate(selectedDate)}`}>
         {selectedForecast ? <><div className="comparison-stat"><span>Predicted morning activity</span><strong>{selectedForecast.wakeTime ?? "Not supplied"}</strong><small>Forecast generated {formatTime(selectedForecast.generatedAt)} · {selectedForecast.source}</small></div><div className="comparison-stat"><span>Observed morning activity</span><strong>Not available</strong><small>{selectedForecast.targetDate > todayKey ? "Outcome still pending for future date." : "No corresponding observed event in the available data."}</small></div><div className="comparison-status"><span>Prediction error</span><strong>Not evaluated</strong></div></> : <EmptyState title="No saved forecast for this date" detail="The dashboard will not synthesize a prediction or an observed outcome." />}
       </Panel>
-      <Panel title="Action interface" subtitle="Demonstration commands only — no hardware control is connected">
-        <div className="action-disclaimer"><CircleAlert size={17} /><span>Actions require a supported execution path and acknowledgment. This demo records intent only; it cannot actuate devices.</span></div>
+      <Panel title="Voice companion" subtitle="Generate an ElevenLabs voice prompt and play it through this device">
+        <div className="action-disclaimer"><CircleAlert size={17} /><span>This first integration plays through the browser device's selected audio output (for example, laptop speakers). It does not yet send audio to the ESP32 base-station speaker.</span></div>
+        <label className="voice-prompt-label" htmlFor="voice-prompt-text">Reminder text</label>
+        <textarea
+          id="voice-prompt-text"
+          className="voice-prompt-input"
+          value={voiceText}
+          maxLength={1200}
+          rows={4}
+          onChange={(event) => setVoiceText(event.target.value)}
+          placeholder="Enter a short, calm reminder..."
+        />
+        <div className="voice-prompt-footer"><span>{voiceText.trim().length}/1200 characters</span><button className="button button-primary" disabled={voiceBusy || !voiceText.trim()} onClick={() => onSpeakPrompt(voiceText)}><Mic2 size={15} />{voiceBusy ? "Generating voice…" : "Generate & play"}</button></div>
+        {voiceError && <p className="inline-error" role="alert"><CircleAlert size={14} />{voiceError}</p>}
+        {voiceNotice && <p className="voice-status" role="status"><Check size={14} />{voiceNotice}</p>}
+        {voiceAudioUrl && <audio className="voice-audio-player" controls preload="metadata" src={voiceAudioUrl} onPlay={onPlaybackStarted} onEnded={onPlaybackFinished} onError={onPlaybackFailed}>Your browser does not support audio playback.</audio>}
+      </Panel>
+      <Panel title="Hardware action interface" subtitle="LED command remains a demonstration action">
+        <div className="action-disclaimer"><CircleAlert size={17} /><span>The dashboard is not connected to a command channel for the ESP32 hardware yet. This control only records intent.</span></div>
         <button className="action-command" disabled={mode !== "DEMO" || actionBusy} onClick={() => onAction("LED reminder command")}><span className="action-icon action-led"><Activity size={17} /></span><span><strong>Record LED reminder command</strong><small>Demo only · physical LED state is not verified</small></span><ArrowRight size={16} /></button>
-        <button className="action-command" disabled={mode !== "DEMO" || actionBusy} onClick={() => onAction("Voice prompt command")}><span className="action-icon action-voice"><Mic2 size={17} /></span><span><strong>Record voice prompt command</strong><small>Demo only · no voice generation or playback</small></span><ArrowRight size={16} /></button>
-        {mode !== "DEMO" && <p className="muted-note">Demo action controls are disabled outside DEMO mode.</p>}
+        {mode !== "DEMO" && <p className="muted-note">The demo LED action control is disabled outside DEMO mode.</p>}
       </Panel>
     </div>
   </>;
 }
 
-function EventList({ events }: { events: ActivityEvent[] }) {
-  return <div className="event-list">{events.map((event) => <div className="event-item" key={event.id}><div className={`event-icon ${event.status === "Observed" ? "event-green" : event.status === "Predicted" ? "event-violet" : "event-blue"}`}>{event.status === "Observed" ? <Check size={15} /> : event.status === "Predicted" ? <Clock3 size={15} /> : <Activity size={15} />}</div><div className="event-content"><div><strong>{event.type}</strong><span className={`status-pill ${event.status === "Observed" ? "status-green" : event.status === "Predicted" ? "status-violet" : "status-blue"}`}>{event.status}</span></div><p>{event.description}</p><small>{formatDate(dateKey(event.timestamp))} · {formatTime(event.timestamp)} · {event.device} · {event.source}</small></div></div>)}</div>;
+function EventList({ events, onSpeakReminder, voiceBusy = false, allowSpeech = false }: { events: ActivityEvent[]; onSpeakReminder?: (event: ActivityEvent) => void; voiceBusy?: boolean; allowSpeech?: boolean }) {
+  return <div className="event-list">{events.map((event) => {
+    const iconClass = event.status === "Observed" ? "event-green" : event.status === "Predicted" ? "event-violet" : "event-blue";
+    const pillClass = event.status === "Observed" ? "status-green" : event.status === "Predicted" ? "status-violet" : "status-blue";
+    const score = event.modelScore == null ? "unavailable" : `${(event.modelScore * 100).toFixed(1)}%`;
+    return <div className="event-item" key={event.id}>
+      <div className={`event-icon ${iconClass}`}>{event.status === "Observed" ? <Check size={15} /> : event.status === "Predicted" ? <Clock3 size={15} /> : <Activity size={15} />}</div>
+      <div className="event-content">
+        <div><strong>{event.type}</strong><span className={`status-pill ${pillClass}`}>{event.status}</span></div>
+        <p>{event.reason || event.description}</p>
+        <small>{formatDate(dateKey(event.timestamp))} · {formatTime(event.timestamp)} · {event.eventSource || event.device} · {event.decisionKind || event.source} · delivery: {event.deliveryState || "not applicable"} · speech: {event.speechState || "not requested"}</small>
+        {(event.modelVersion || event.dataQuality) && <small>{event.modelVersion ? `Experimental model ${event.modelVersion} · score ${score} · ` : ""}data {event.dataQuality || "unknown"}{event.dataFreshnessMinutes == null ? "" : ` · ${event.dataFreshnessMinutes.toFixed(1)} min old`}</small>}
+        {event.speechError && <p className="inline-error">{event.speechError}</p>}
+        {allowSpeech && event.eligible && event.eventSource === "simulated_demo" && [undefined, "not_requested", "failed"].includes(event.speechState) && <button className="button button-primary reminder-speech-button" disabled={voiceBusy} onClick={() => onSpeakReminder?.(event)}><Mic2 size={14} />{voiceBusy ? "Generating speech…" : "Generate & play reminder"}</button>}
+      </div>
+    </div>;
+  })}</div>;
 }
 
 function DeviceHealthPage({ mode, lastUpdated, loading, liveAvailable }: { mode: DataMode; lastUpdated?: string; loading: boolean; liveAvailable: boolean }) {
