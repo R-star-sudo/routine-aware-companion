@@ -8,7 +8,9 @@
  *   2. Samples biometrics and inertial telemetry using non-blocking schedules.
  *   3. Packages data into a packed, validated C-struct (magic header + XOR checksum).
  *   4. Broadcasts telemetry packets over ESP-NOW on fixed Channel 1 every 100ms (10 Hz).
- *   5. Outputs summary status to the Serial monitor for live debugging.
+ *   5. Detects a simple two-impulse wrist tap gesture and reports its sequence
+ *      in the same ESP-NOW packet for the Base Station to acknowledge actions.
+ *   6. Outputs summary status to the Serial monitor for live debugging.
  *
  * Hardware Connections:
  *   - Shared I2C Bus:
@@ -25,8 +27,8 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
-#include <Adafruit_MPU6050.h>
-#include <Adafruit_Sensor.h>
+#include <math.h>
+#include <MPU6050_tockn.h>
 #include <MAX30105.h>
 #include <heartRate.h>
 #include <OneWire.h>
@@ -38,6 +40,8 @@
 #define PIN_I2C_SDA         21
 #define PIN_I2C_SCL         22
 #define PIN_ONE_WIRE_BUS    4
+#define PIN_LED_AWAIT_TAP   13
+#define PIN_LED_STATUS      2
 
 // ============================================================================
 // RF & ESP-NOW Configuration
@@ -92,6 +96,9 @@ struct SensorData {
     bool max_ok;
     bool ds_ok;
 
+    // Incremented once for each detected double-tap gesture.
+    uint16_t tap_event_sequence;
+
     // Integrity Checksum
     uint8_t checksum;          // XOR checksum across all preceding bytes
 };
@@ -100,7 +107,7 @@ struct SensorData {
 // ============================================================================
 // Sensor Instances & Global State
 // ============================================================================
-Adafruit_MPU6050 mpu;
+MPU6050 mpu6050(Wire);
 MAX30105 particleSensor;
 OneWire oneWire(PIN_ONE_WIRE_BUS);
 DallasTemperature dallasSensors(&oneWire);
@@ -121,6 +128,8 @@ uint32_t lastDsSuccessTime  = 0;
 // Non-blocking loop timers
 uint32_t lastTransmitTime = 0;
 uint32_t lastPrintTime = 0;
+uint32_t lastStatusLedToggleTime = 0;
+bool statusLedOn = false;
 uint32_t lastMpuSampleTime = 0;
 uint32_t lastDsRequestTime = 0;
 bool dsConversionPending = false;
@@ -139,6 +148,19 @@ float currentBpm = 0.0f;
 
 // Contact detection threshold for MAX30102 IR channel
 static const uint32_t IR_FINGER_THRESHOLD = 50000;
+static const float TAP_DEVIATION_THRESHOLD_M_S2 = 8.0f;
+static const uint32_t TAP_PAIR_WINDOW_MS = 800;
+static const uint32_t TAP_MIN_GAP_MS = 150;
+static const uint32_t TAP_COOLDOWN_MS = 250;
+
+// Double-tap detector state. It uses acceleration magnitude so taps work in
+// any wrist orientation; the thresholds are intentionally easy to tune.
+static float gravityMagnitude = 9.81f;
+static uint32_t firstTapTime = 0;
+static uint32_t lastTapImpulseTime = 0;
+static uint32_t lastDoubleTapTime = 0;
+static uint32_t tapLedOffAt = 0;
+static bool tapLedAwaitingRestore = false;
 
 // ============================================================================
 // Checksum Calculation Routine
@@ -177,6 +199,45 @@ void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 // ============================================================================
 
 /**
+ * @brief Detects a double tap from two short acceleration impulses.
+ * The detector reports an event sequence number rather than a one-packet flag,
+ * so the base station can observe it even if one ESP-NOW packet is lost.
+ */
+void updateDoubleTap(float ax, float ay, float az, uint32_t now) {
+    const float magnitude = sqrtf(ax * ax + ay * ay + az * az);
+    const float deviation = fabsf(magnitude - gravityMagnitude);
+
+    // Track the slow gravity component only while the wrist is relatively calm.
+    if (deviation < TAP_DEVIATION_THRESHOLD_M_S2) {
+        gravityMagnitude = 0.98f * gravityMagnitude + 0.02f * magnitude;
+    }
+
+    if (deviation < TAP_DEVIATION_THRESHOLD_M_S2 ||
+        now - lastTapImpulseTime < TAP_MIN_GAP_MS ||
+        now - lastDoubleTapTime < TAP_COOLDOWN_MS) {
+        if (firstTapTime != 0 && now - firstTapTime > TAP_PAIR_WINDOW_MS) {
+            firstTapTime = 0;
+        }
+        return;
+    }
+
+    lastTapImpulseTime = now;
+    if (firstTapTime == 0 || now - firstTapTime > TAP_PAIR_WINDOW_MS) {
+        firstTapTime = now;
+        return;
+    }
+
+    currentTelemetry.tap_event_sequence++;
+    firstTapTime = 0;
+    lastDoubleTapTime = now;
+    digitalWrite(PIN_LED_AWAIT_TAP, LOW);
+    tapLedOffAt = now;
+    tapLedAwaitingRestore = true;
+    Serial.printf("[GESTURE] Double tap detected (sequence=%u)\n",
+                  (unsigned int)currentTelemetry.tap_event_sequence);
+}
+
+/**
  * @brief Reads MPU6050 at periodic intervals (20 Hz) and tracks live sensor health.
  */
 void updateMpu6050() {
@@ -189,16 +250,26 @@ void updateMpu6050() {
     if (now - lastMpuSampleTime >= MPU_SAMPLE_INTERVAL_MS) {
         lastMpuSampleTime = now;
 
-        sensors_event_t a, g, temp;
-        if (mpu.getEvent(&a, &g, &temp)) {
-            currentTelemetry.ax = a.acceleration.x;
-            currentTelemetry.ay = a.acceleration.y;
-            currentTelemetry.az = a.acceleration.z;
-            currentTelemetry.gx = g.gyro.x;
-            currentTelemetry.gy = g.gyro.y;
-            currentTelemetry.gz = g.gyro.z;
+        mpu6050.update();
+        float ax_g = mpu6050.getAccX();
+        float ay_g = mpu6050.getAccY();
+        float az_g = mpu6050.getAccZ();
+
+        if (isfinite(ax_g) && isfinite(ay_g) && isfinite(az_g)) {
+            currentTelemetry.ax = ax_g * 9.80665f;
+            currentTelemetry.ay = ay_g * 9.80665f;
+            currentTelemetry.az = az_g * 9.80665f;
+            currentTelemetry.gx = mpu6050.getGyroX() * (PI / 180.0f);
+            currentTelemetry.gy = mpu6050.getGyroY() * (PI / 180.0f);
+            currentTelemetry.gz = mpu6050.getGyroZ() * (PI / 180.0f);
             currentTelemetry.mpu_ok = true;
             lastMpuSuccessTime = now;
+            updateDoubleTap(
+                currentTelemetry.ax,
+                currentTelemetry.ay,
+                currentTelemetry.az,
+                now
+            );
         } else {
             currentTelemetry.mpu_ok = false;
         }
@@ -391,25 +462,54 @@ void setup() {
     Serial.println(F(" Step 2: Sensor Acquisition & 10Hz ESP-NOW Transmission"));
     Serial.println(F("========================================================"));
 
+    pinMode(PIN_LED_AWAIT_TAP, OUTPUT);
+    digitalWrite(PIN_LED_AWAIT_TAP, HIGH);
+    pinMode(PIN_LED_STATUS, OUTPUT);
+    digitalWrite(PIN_LED_STATUS, LOW);
+
     // 1. Initialize Shared I2C Bus
     Serial.printf("[I2C] Initializing on SDA: GPIO %d, SCL: GPIO %d...\n", 
                   PIN_I2C_SDA, PIN_I2C_SCL);
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
     Wire.setClock(400000);
 
+    // Fast I2C bus device scan
+    Serial.print(F("[I2C] Scanning bus addresses: "));
+    uint8_t devicesFound = 0;
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) {
+            Serial.printf("0x%02X ", addr);
+            devicesFound++;
+        }
+    }
+    if (devicesFound == 0) {
+        Serial.print(F("No devices found!"));
+    }
+    Serial.println();
+
     // 2. Initialize MPU6050
-    Serial.print(F("[MPU6050] Initializing at 0x68... "));
-    if (mpu.begin(0x68, &Wire)) {
+    Serial.print(F("[MPU6050] Initializing at 0x68 (MPU6050_tockn)... "));
+    Wire.beginTransmission(0x68);
+    byte i2cError = Wire.endTransmission();
+    if (i2cError == 0) {
+        mpu6050.begin();
         mpuInitialized = true;
         currentTelemetry.mpu_ok = false; // Validated on first live sample
-        mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
-        mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-        mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
         Serial.println(F("OK"));
     } else {
-        mpuInitialized = false;
-        currentTelemetry.mpu_ok = false;
-        Serial.println(F("FAILED! Check wiring."));
+        // Also check address 0x69 in case AD0 pin is HIGH
+        Wire.beginTransmission(0x69);
+        if (Wire.endTransmission() == 0) {
+            Serial.println(F("Detected at 0x69 (AD0 is HIGH)"));
+            mpu6050.begin();
+            mpuInitialized = true;
+            currentTelemetry.mpu_ok = false;
+        } else {
+            mpuInitialized = false;
+            currentTelemetry.mpu_ok = false;
+            Serial.println(F("FAILED! Check wiring."));
+        }
     }
 
     // 3. Initialize MAX30102
@@ -498,6 +598,17 @@ void loop() {
     updateDs18b20();   // Non-blocking temperature conversion
 
     uint32_t currentMillis = millis();
+
+    if (currentMillis - lastStatusLedToggleTime >= 500) {
+        lastStatusLedToggleTime = currentMillis;
+        statusLedOn = !statusLedOn;
+        digitalWrite(PIN_LED_STATUS, statusLedOn ? HIGH : LOW);
+    }
+
+    if (tapLedAwaitingRestore && currentMillis - tapLedOffAt >= 500) {
+        digitalWrite(PIN_LED_AWAIT_TAP, HIGH);
+        tapLedAwaitingRestore = false;
+    }
 
     // 2. Transmit ESP-NOW telemetry packet every 100ms (10 Hz)
     if (currentMillis - lastTransmitTime >= TRANSMIT_INTERVAL_MS) {

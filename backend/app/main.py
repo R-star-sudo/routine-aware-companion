@@ -4,17 +4,8 @@ from pathlib import Path
 from threading import Lock
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field
-
-from app.services.inference_service import predict
-from app.services.personal_baseline import summarize_personal_baseline
-from app.services.feature_preparation import prepare_features
-from app.services.reminder_policy import DEMO_TARGET, ReminderPolicy
-from app.services.voice_service import generate_speech, validate_speech_text
-from app.dataset_generator import LABEL_COLUMNS
 
 from app.schemas.telemetry import TelemetryRecord
 from app.services.telemetry_storage import TelemetryStorageError, TelemetryStore
@@ -119,6 +110,14 @@ def _record_decision(request: Request, decision: dict[str, object], *, title: st
 
 def create_app(storage_path: Path | None = None) -> FastAPI:
     application = FastAPI(title="Routine-Aware Companion API")
+    # The Vite dashboard runs on a different localhost port from FastAPI.
+    # Restrict browser access to local development origins.
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
+    )
     application.state.telemetry_store = TelemetryStore(storage_path)
     application.state.reminder_policy = ReminderPolicy()
     application.state.reminder_events = []
