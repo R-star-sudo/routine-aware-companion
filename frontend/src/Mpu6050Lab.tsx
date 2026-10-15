@@ -117,9 +117,36 @@ function mean(samples: Reading[]): Reading {
   ) as Reading;
 }
 
-function csvCell(value: string | number): string {
-  const text = String(value);
+function csvCell(value: unknown): string {
+  const text = value === null || value === undefined
+    ? ""
+    : typeof value === "object" ? JSON.stringify(value) ?? "" : String(value);
   return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+const TELEMETRY_CSV_FIELDS = [
+  "schema_version", "source", "device_id", "sequence", "timestamp",
+  "acceleration_x_m_s2", "acceleration_y_m_s2", "acceleration_z_m_s2",
+  "angular_velocity_x_rad_s", "angular_velocity_y_rad_s", "angular_velocity_z_rad_s",
+  "pulse_rate_bpm", "skin_temperature_c", "room_temperature_c",
+  "room_humidity_percent", "pillbox_open", "sensor_validity",
+];
+
+function saveCsvFile(csv: string, filePrefix: string) {
+  const url = URL.createObjectURL(new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  const exportedAt = new Date().toISOString().replace(/[:.]/g, "-");
+  link.href = url;
+  link.download = `${filePrefix}-${exportedAt}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function downloadTelemetryCsv(records: Record<string, unknown>[]) {
+  const rows = records.map((record) => TELEMETRY_CSV_FIELDS.map((field) => csvCell(record[field])).join(","));
+  saveCsvFile(`${TELEMETRY_CSV_FIELDS.join(",")}\r\n${rows.join("\r\n")}\r\n`, "routine-aware-telemetry");
 }
 
 function elapsedLabel(milliseconds: number): string {
@@ -176,15 +203,7 @@ function downloadCsv(sessions: LabSession[]) {
     ),
   );
   const csv = [headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
-  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
-  const link = document.createElement("a");
-  const exportedAt = new Date().toISOString().replace(/[:.]/g, "-");
-  link.href = url;
-  link.download = `mpu6050-lab-dataset-${exportedAt}.csv`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  saveCsvFile(csv, "mpu6050-lab-dataset");
 }
 
 function samplesIn(session: LabSession): number {
@@ -192,6 +211,7 @@ function samplesIn(session: LabSession): number {
 }
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL?.trim() || "http://127.0.0.1:8000").replace(/\/$/, "");
+const API_STALE_AFTER_MS = 5000;
 
 function readingFromTelemetry(record: Record<string, unknown>): Reading | null {
   const validity = record.sensor_validity;
@@ -210,6 +230,8 @@ export default function Mpu6050Lab({ active }: { active: boolean }) {
   const [dataSource, setDataSource] = useState<DataSource>("api");
   const [apiConnected, setApiConnected] = useState(false);
   const [apiTimestamp, setApiTimestamp] = useState<string | null>(null);
+  const [apiLastSampleAt, setApiLastSampleAt] = useState<number | null>(null);
+  const [apiRecordCount, setApiRecordCount] = useState(0);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState("");
   const [latest, setLatest] = useState<Reading | null>(null);
@@ -243,6 +265,8 @@ export default function Mpu6050Lab({ active }: { active: boolean }) {
   const wasConnectedRef = useRef(false);
   const lastApiSeqRef = useRef<number | null>(null);
   const apiTimestampRef = useRef<string | null>(null);
+  const apiHistoryRef = useRef<Record<string, unknown>[]>([]);
+  const pollInFlightRef = useRef(false);
 
   useEffect(() => {
     const timer = window.setInterval(() => setClock(Date.now()), 250);
@@ -299,8 +323,15 @@ export default function Mpu6050Lab({ active }: { active: boolean }) {
 
   // ── API polling: catch up all new telemetry rows so task captures retain samples between polls ──
   const pollApi = useCallback(async () => {
+    if (pollInFlightRef.current) return;
+    pollInFlightRef.current = true;
     try {
-      const res = await fetch(`${API_BASE}/api/v1/telemetry/history?limit=500`);
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 3000);
+      const res = await fetch(`${API_BASE}/api/v1/telemetry/history?limit=500`, {
+        cache: "no-store",
+        signal: controller.signal,
+      }).finally(() => window.clearTimeout(timeout));
       if (!res.ok) { setApiConnected(false); return; }
       const payload: unknown = await res.json();
       if (!Array.isArray(payload)) { setApiConnected(false); return; }
@@ -309,41 +340,69 @@ export default function Mpu6050Lab({ active }: { active: boolean }) {
           typeof record === "object" && record !== null && !Array.isArray(record)
           && typeof (record as Record<string, unknown>).sequence === "number"
           && Number.isInteger((record as Record<string, unknown>).sequence),
-        )
-        .sort((left, right) => Number(left.sequence) - Number(right.sequence));
+        );
+      // The API returns newest-first. Preserve that order for export and reverse it
+      // only when replaying records so sensor packet-counter resets are detectable.
+      apiHistoryRef.current = records;
+      setApiRecordCount(records.length);
 
       if (records.length === 0) { setApiConnected(true); return; }
-      if (lastApiSeqRef.current === null) {
+      const chronological = [...records].reverse();
+      let currentBootStart = 0;
+      for (let index = 1; index < chronological.length; index += 1) {
+        if (Number(chronological[index].sequence) < Number(chronological[index - 1].sequence)) {
+          currentBootStart = index;
+        }
+      }
+      const currentBootRecords = chronological.slice(currentBootStart);
+      const newest = records[0];
+      const newestSequence = Number(newest.sequence);
+      const newestTimestamp = typeof newest.timestamp === "string" ? newest.timestamp : null;
+
+      const previousSequence = lastApiSeqRef.current;
+      if (previousSequence === null) {
         // Seed the cursor with the newest existing row; don't attach pre-session history to a new task.
-        const newest = records.at(-1)!;
-        lastApiSeqRef.current = Number(newest.sequence);
-        const ts = typeof newest.timestamp === "string" ? newest.timestamp : null;
-        setApiTimestamp(ts);
-        apiTimestampRef.current = ts;
+        lastApiSeqRef.current = newestSequence;
+        setApiTimestamp(newestTimestamp);
+        apiTimestampRef.current = newestTimestamp;
         const reading = readingFromTelemetry(newest);
         if (reading) setLatest(reading);
         setApiConnected(true);
         return;
       }
 
-      let lastSequence = lastApiSeqRef.current;
-      for (const record of records) {
+      const sequenceReset = newestSequence < previousSequence;
+      // The simulated clock can be deliberately moved backwards, so sequence is
+      // the reset signal; timestamps alone must not replay old task samples.
+      const newBoot = sequenceReset;
+      const newRecords = newBoot
+        ? currentBootRecords
+        : currentBootRecords.filter((record) => Number(record.sequence) > previousSequence);
+
+      for (const record of newRecords) {
         const sequence = Number(record.sequence);
-        if (sequence <= lastSequence) continue;
-        lastSequence = sequence;
         lastApiSeqRef.current = sequence;
         const timestamp = typeof record.timestamp === "string" ? record.timestamp : null;
         setApiTimestamp(timestamp);
         apiTimestampRef.current = timestamp;
         const reading = readingFromTelemetry(record);
         if (!reading) continue;
+        setApiLastSampleAt(Date.now());
         receiveReading(reading, "api", timestamp, sequence,
           typeof record.device_id === "string" ? record.device_id : null,
           typeof record.source === "string" ? record.source : null);
       }
+      // Record a reset even when the newest packets do not yet contain valid MPU data.
+      if (newBoot && newRecords.length === 0) {
+        lastApiSeqRef.current = newestSequence;
+        setApiTimestamp(newestTimestamp);
+        apiTimestampRef.current = newestTimestamp;
+      }
       setApiConnected(true);
     } catch {
       setApiConnected(false);
+    } finally {
+      pollInFlightRef.current = false;
     }
   }, [receiveReading]);
 
@@ -356,7 +415,8 @@ export default function Mpu6050Lab({ active }: { active: boolean }) {
   }, [active, dataSource, pollApi]);
 
   // Effective connection status: either serial or API
-  const isConnected = dataSource === "serial" ? connected : apiConnected;
+  const apiFresh = apiConnected && apiLastSampleAt !== null && clock - apiLastSampleAt <= API_STALE_AFTER_MS;
+  const isConnected = dataSource === "serial" ? connected : apiFresh;
 
   const currentSession = sessions.find((item) => item.id === sessionId) ?? null;
   const activeTask = currentSession?.activeTaskIndex == null
@@ -373,6 +433,20 @@ export default function Mpu6050Lab({ active }: { active: boolean }) {
   const liveCalibrated = latest
     ? Object.fromEntries(AXES.map((axis) => [axis, latest[axis] - offsets[axis]])) as Reading
     : null;
+
+  function exportTelemetryHistory() {
+    const records = apiHistoryRef.current;
+    if (records.length === 0) {
+      setError("The telemetry API has no records to export yet. Start the collector and wait for sensor data.");
+      return;
+    }
+    try {
+      downloadTelemetryCsv(records);
+      setError("");
+    } catch (cause) {
+      setError(cause instanceof Error ? `Could not download telemetry CSV: ${cause.message}` : "Could not download telemetry CSV.");
+    }
+  }
 
   function updateSession(id: string, update: (session: LabSession) => LabSession) {
     setSessions((previous) => previous.map((session) => session.id === id ? update(session) : session));
@@ -738,25 +812,30 @@ export default function Mpu6050Lab({ active }: { active: boolean }) {
     setDataSource("serial");
     setLatest(null);
     lastApiSeqRef.current = null;
+    setApiLastSampleAt(null);
   };
   const switchToApi = () => {
     if (connected) void disconnect();
     setDataSource("api");
     setLatest(null);
     lastApiSeqRef.current = null;
+    setApiLastSampleAt(null);
   };
 
+  const apiConnectionLabel = !apiConnected ? "Offline" : apiFresh ? "Live" : latest ? "Stale" : "Waiting";
   const bannerText = dataSource === "api"
     ? apiConnected
-      ? latest ? "MPU6050 readings via API" : "API connected · waiting for MPU data"
+      ? apiFresh && latest ? "MPU6050 readings via API" : latest ? "API connected · telemetry is stale" : "API connected · waiting for MPU data"
       : "Connecting to telemetry API…"
     : connected
       ? latest ? "MPU6050 readings received" : "Serial connected · waiting for valid MPU data"
       : "Sensor disconnected";
   const bannerDetail = dataSource === "api"
-    ? apiConnected && latest
-      ? `Live via collector API · ${apiTimestamp ? new Date(apiTimestamp).toLocaleTimeString() : ""}`
-      : "Readings appear automatically when the collector is running."
+    ? apiConnected && apiFresh && latest
+      ? `New sensor packets received · ${apiTimestamp ? new Date(apiTimestamp).toLocaleTimeString() : ""}`
+      : apiConnected && latest
+        ? `Last sensor packet: ${apiTimestamp ? new Date(apiTimestamp).toLocaleTimeString() : "unknown time"}. Waiting for a new packet from the collector.`
+        : "Readings appear automatically when the collector is running."
     : connected && latest
       ? "Live firmware readings · m/s² and rad/s"
       : "No readings are shown until a valid sensor packet arrives.";
@@ -783,12 +862,13 @@ export default function Mpu6050Lab({ active }: { active: boolean }) {
       </div>
       {dataSource === "serial" && <div className="lab-port-warning"><b>Serial port access is exclusive.</b> Stop the companion collector before connecting here. The collector and this browser page cannot read the same USB port simultaneously. Lab captures are separate from the routine telemetry API.</div>}
       {dataSource === "api" && !apiConnected && <div className="lab-warning">Cannot reach telemetry API at {API_BASE}. Make sure the backend and collector are running (use <code>.\dashboard</code>).</div>}
+      {dataSource === "api" && apiConnected && latest && !apiFresh && <div className="lab-warning">The API is reachable, but no new valid MPU6050 packet has arrived recently. Check the collector window for serial or posting errors; old stored readings are marked stale.</div>}
       {error && <div className="lab-error" role="alert">{error}</div>}
       {invalidLines > 0 && dataSource === "serial" && <div className="lab-warning">{invalidLines} serial line(s) ignored because they did not contain valid MPU6050 axes.</div>}
 
       <div className="lab-stats">
         <div><small>DATA SOURCE</small><b>{dataSource === "api" ? "API" : "Serial"}</b></div>
-        <div><small>CONNECTION</small><b>{isConnected ? "Connected" : "Offline"}</b></div>
+        <div><small>CONNECTION</small><b>{dataSource === "api" ? apiConnectionLabel : connected ? "Connected" : "Offline"}</b></div>
         <div><small>CALIBRATION</small><b>Version {calibrationVersion}</b></div>
         <div><small>TASKS COMPLETED</small><b>{completedTasks} / {shownTasks.length || taskCount}</b></div>
         <div><small>COLLECTED SAMPLES</small><b>{(shownSession ? samplesIn(shownSession) : 0).toLocaleString()}</b></div>
@@ -796,8 +876,8 @@ export default function Mpu6050Lab({ active }: { active: boolean }) {
       </div>
 
       <section className="lab-card" id="lab-live-data">
-        <div className="lab-section-heading"><div><span>REAL-TIME MONITORING</span><h2>Live sensor data</h2><p>{dataSource === "api" ? "Values from the telemetry API (collector → backend → dashboard)" : "Raw values from the firmware and values after the saved offsets."}</p></div><span className={`lab-stream-badge ${isConnected ? "is-connected" : ""}`}>{isConnected ? (dataSource === "api" ? "API LIVE" : "SERIAL LIVE") : "NO SIGNAL"}</span></div>
-        {!isConnected && <div className="lab-empty"><b>{dataSource === "api" ? "Waiting for API data" : "No live sensor readings"}</b><span>{dataSource === "api" ? "The telemetry API will be polled automatically. Launch the dashboard with .\\dashboard to start the collector." : "Connect the base station's USB serial port to display actual MPU6050 readings."}</span></div>}
+        <div className="lab-section-heading"><div><span>REAL-TIME MONITORING</span><h2>Live sensor data</h2><p>{dataSource === "api" ? "Values from the telemetry API (collector → backend → dashboard)" : "Raw values from the firmware and values after the saved offsets."}</p></div><span className={`lab-stream-badge ${isConnected ? "is-connected" : apiConnected && latest ? "is-stale" : ""}`}>{isConnected ? (dataSource === "api" ? "API LIVE" : "SERIAL LIVE") : apiConnected && latest ? "API STALE" : "NO SIGNAL"}</span></div>
+        {!isConnected && <div className="lab-empty"><b>{dataSource === "api" ? apiConnected && latest ? "Sensor data is stale" : "Waiting for API data" : "No live sensor readings"}</b><span>{dataSource === "api" ? apiConnected && latest ? "The displayed values are the last saved reading. A new packet will restore live status." : "The telemetry API will be polled automatically. Launch the dashboard with .\\dashboard to start the collector." : "Connect the base station's USB serial port to display actual MPU6050 readings."}</span></div>}
         <div className="lab-reading-grid">
           <ReadingCard title="RAW ACCELEROMETER" axes={ACCEL_AXES} reading={latest} unit="m/s²" />
           <ReadingCard title="CALIBRATED ACCELEROMETER" axes={ACCEL_AXES} reading={liveCalibrated} unit="m/s²" />
@@ -855,7 +935,8 @@ export default function Mpu6050Lab({ active }: { active: boolean }) {
       </section>
 
       <section className="lab-card" id="lab-history">
-        <div className="lab-section-heading"><div><span>COLLECTION LOG</span><h2>Session history & export</h2><p>Each sample row includes its task label, task/session status, capture source, and timing. Lab records stay separate from routine telemetry.</p></div><button className="lab-button lab-primary" onClick={() => downloadCsv(sessions)} disabled={allSamples === 0} title="Export MPU6050 samples with task labels, task and session times, statuses, source sequence, calibration, and raw/calibrated axes.">Download labeled CSV · {allSamples} samples</button></div>
+        <div className="lab-section-heading"><div><span>COLLECTION LOG</span><h2>Session history & export</h2><p>Telemetry export contains the latest API records across sensors. Task export adds task labels and calibration for samples captured during started tasks.</p></div><div className="lab-export-actions"><button className="lab-button lab-primary" onClick={exportTelemetryHistory} disabled={dataSource !== "api" || apiRecordCount === 0} title="Download the latest telemetry API records, up to 500 rows.">Download sensor CSV · {apiRecordCount} rows</button><button className="lab-button lab-outline" onClick={() => downloadCsv(sessions)} disabled={allSamples === 0} title="Download only MPU6050 readings captured while a lab task was active.">Download task CSV · {allSamples} samples</button></div></div>
+        {allSamples === 0 && <small className="lab-muted">Task CSV is unavailable until you start a task and fresh sensor samples arrive. Sensor CSV exports API history independently.</small>}
         {!sessions.length ? <div className="lab-empty">No lab sessions yet.</div> : <div className="lab-table-wrap"><table className="lab-table"><thead><tr><th>SESSION</th><th>STARTED</th><th>STATUS</th><th>TASKS</th><th>SAMPLES</th><th>DURATION</th></tr></thead><tbody>{[...sessions].reverse().map((session) => <tr key={session.id}><td>{session.id.slice(0, 8).toUpperCase()}</td><td>{timestampLabel(session.startedAt)}</td><td>{session.status}</td><td>{session.tasks.filter((task) => task.status === "completed").length} completed · {session.tasks.filter((task) => task.status === "incomplete" || task.status === "cancelled").length} incomplete</td><td>{samplesIn(session)}</td><td>{elapsedLabel(Math.max(0, new Date(session.endedAt ?? clock).getTime() - new Date(session.startedAt).getTime()))}</td></tr>)}</tbody></table></div>}
       </section>
       <p className="lab-footer">{dataSource === "api" ? "Data source: telemetry API (collector → backend). The collector reads the base station serial port and posts records to the API. No direct browser serial connection is needed." : "Companion firmware serial format: newline-delimited unified JSON with valid wearable.mpu_ok and axes ax…gz. No sensor readings are simulated."}</p>

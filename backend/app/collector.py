@@ -76,6 +76,10 @@ def post_lines(
                     file=error_stream,
                 )
                 errors += 1
+            elif line_number % 10 == 1:
+                seq = record.get("sequence")
+                ts = record.get("timestamp")
+                print(f"[collector] Streaming: packet #{seq} ({ts}) -> API OK", file=error_stream)
         except httpx.RequestError as exc:
             print(f"Line {line_number}: API request failed: {exc}", file=error_stream)
             errors += 1
@@ -329,6 +333,18 @@ def _send_startup_commands(serial_port: object, commands: list[str]) -> None:
     print(f"Sent {len(commands)} startup command(s) to base station.", file=sys.stderr)
 
 
+def _read_serial_lines(serial_port: object) -> Iterable[str]:
+    """Continuously yield lines from serial without exiting on 1-second read timeouts."""
+    while True:
+        try:
+            raw = serial_port.readline()  # type: ignore[attr-defined]
+        except (OSError, Exception):
+            break
+        if not raw:
+            continue
+        yield raw.decode("utf-8", errors="replace")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Post newline-delimited telemetry to the local API."
@@ -466,8 +482,8 @@ def main() -> int:
                 args.serial_port, args.baudrate, timeout=1, write_timeout=2
             ) as serial_port:
                 _send_startup_commands(serial_port, startup_commands)
-                for raw_line in serial_port:
-                    sys.stdout.write(raw_line.decode("utf-8", errors="replace"))
+                for raw_line in _read_serial_lines(serial_port):
+                    sys.stdout.write(raw_line)
                     sys.stdout.flush()
             return 0
 
@@ -480,7 +496,7 @@ def main() -> int:
                 ) as serial_port:
                     _send_startup_commands(serial_port, startup_commands)
                     errors = post_lines(
-                        (line.decode("utf-8", errors="replace") for line in serial_port),
+                        _read_serial_lines(serial_port),
                         client,
                         args.api_url,
                         audio_directory=args.audio_dir,

@@ -81,23 +81,46 @@ def api_record_to_dashboard_data(rec: dict) -> dict:
     }
 
 
-def fetch_latest_api(api_url: str = "http://127.0.0.1:8000/api/v1/telemetry/latest") -> dict | None:
-    """Fetch latest telemetry record from the local FastAPI server."""
+def check_backend_available(base_url: str = "http://127.0.0.1:8000") -> bool:
+    """Check if the local FastAPI backend is responsive."""
+    try:
+        req = urllib.request.Request(f"{base_url}/health", headers={"User-Agent": "live_monitor"})
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def fetch_latest_api(api_url: str = "http://127.0.0.1:8000/api/v1/telemetry/latest") -> tuple[str, dict | None]:
+    """Fetch latest telemetry record from the local FastAPI server.
+
+    Returns:
+        ("ok", data) if telemetry record exists
+        ("empty", None) if backend is running but has no telemetry records yet (HTTP 404)
+        ("offline", None) if backend is unreachable
+    """
     try:
         req = urllib.request.Request(api_url, headers={"User-Agent": "live_monitor"})
-        with urllib.request.urlopen(req, timeout=0.8) as resp:
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
             if resp.status == 200:
                 raw = resp.read()
                 record = json.loads(raw.decode("utf-8"))
-                return api_record_to_dashboard_data(record)
+                return "ok", api_record_to_dashboard_data(record)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return "empty", None
+        return "offline", None
     except Exception:
-        return None
+        return "offline", None
+    return "offline", None
 
 
 def stream_from_api(api_url: str, fps: float) -> int:
     """Live stream dashboard directly from FastAPI when COM port is locked by dashboard."""
     min_interval = 1.0 / max(1.0, fps)
     last_render = 0.0
+    first_render = True
+    waiting_dots = 0
 
     try:
         while True:
@@ -106,14 +129,25 @@ def stream_from_api(api_url: str, fps: float) -> int:
                 time.sleep(max(0.01, min_interval - (now - last_render)))
                 continue
 
-            data = fetch_latest_api(api_url)
-            if data is not None:
+            status, data = fetch_latest_api(api_url)
+            if status == "ok" and data is not None:
                 last_render = now
+                first_render = False
                 dashboard = format_dashboard(data)
                 sys.stdout.write(CLEAR_SCREEN + dashboard + "\n")
                 sys.stdout.flush()
+            elif status == "empty":
+                if first_render:
+                    waiting_dots = (waiting_dots + 1) % 4
+                    dots = "." * waiting_dots + " " * (3 - waiting_dots)
+                    sys.stdout.write(
+                        f"\r{FG_CYAN}[API STREAM]{RESET} Dashboard is running. Waiting for wearable telemetry packets{dots}"
+                    )
+                    sys.stdout.flush()
+                time.sleep(0.3)
             else:
-                time.sleep(0.2)
+                # Backend might be momentarily restarting
+                time.sleep(0.5)
 
     except KeyboardInterrupt:
         print(f"\n{FG_YELLOW}Monitor stopped.{RESET}")
@@ -413,15 +447,17 @@ def main():
         ser = serial.Serial(args.port, args.baud, timeout=1.0)
     except Exception as exc:
         # Check if backend API is running and streaming
-        api_data = fetch_latest_api(args.api_url)
-        if api_data is not None:
-            print(f"\n{FG_CYAN}[INFO] {args.port} is busy (locked by Dashboard Collector).{RESET}")
+        status, _ = fetch_latest_api(args.api_url)
+        backend_alive = (status in ("ok", "empty")) or check_backend_available("http://127.0.0.1:8000")
+        if backend_alive:
+            print(f"\n{FG_CYAN}[INFO] {args.port} is in use (by Dashboard Collector).{RESET}")
             print(f"{FG_GREEN}>> Auto-switching: streaming live telemetry from Backend API ({args.api_url})...{RESET}\n")
             time.sleep(0.5)
             return stream_from_api(args.api_url, args.fps)
 
         print(f"Error opening {args.port}: {exc}", file=sys.stderr)
         print("Tip: If Dashboard is starting, wait 2 seconds or verify COM port.", file=sys.stderr)
+        print("Tip: If another terminal or script has COM port open, close it first.", file=sys.stderr)
         return 1
 
     min_interval = 1.0 / max(1.0, args.fps)
@@ -431,14 +467,16 @@ def main():
         try:
             epoch, offset_minutes, display_time = parse_clock_inputs(args.date, args.time)
             clock_cmd = f"SIM_CLOCK,{epoch},{offset_minutes},{args.rate}\n"
-            print(f"Initializing Base Station clock to: {display_time} ({args.rate}x speed)...")
-            time.sleep(0.3)
+            # ESP32 resets on serial open; wait 2.5s for bootloader and setup() to complete
+            print(f"Awaiting Base Station ready ({display_time}, {args.rate}x speed)...")
+            time.sleep(2.5)
             ser.write(clock_cmd.encode("ascii"))
             ser.flush()
+            time.sleep(0.2)
         except Exception as exc:
             print(f"[WARN] Could not set clock: {exc}", file=sys.stderr)
 
-    print("Connected! Streaming telemetry...")
+    print("Connected! Waiting for telemetry stream...")
 
     try:
         while True:
@@ -446,6 +484,13 @@ def main():
             if not raw:
                 continue
             line = raw.decode("utf-8", errors="replace").strip()
+
+            # Show Base Station status heartbeats while waiting for first wearable packet
+            if line.startswith("[STATUS]") and last_render == 0.0:
+                sys.stdout.write(f"\r{FG_YELLOW}{line[:80]}{RESET}")
+                sys.stdout.flush()
+                continue
+
             if not line.startswith("{"):
                 continue
 
@@ -467,7 +512,8 @@ def main():
     except KeyboardInterrupt:
         print(f"\n{FG_YELLOW}Monitor stopped.{RESET}")
     finally:
-        ser.close()
+        if ser is not None and ser.is_open:
+            ser.close()
     return 0
 
 

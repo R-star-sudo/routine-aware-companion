@@ -39,7 +39,9 @@
 .mpu6050-lab .lab-section-heading p { margin-bottom: 0; color: #8795a6; font-size: 9px; line-height: 1.5; }
 .mpu6050-lab .lab-stream-badge, .mpu6050-lab .lab-version { flex: none; padding: 5px 8px; border-radius: 5px; color: #8b97a6; background: #f1f3f6; font-size: 8px; font-weight: 800; letter-spacing: .6px; }
 .mpu6050-lab .lab-stream-badge.is-connected { color: #23815e; background: #eaf8f1; }
+.mpu6050-lab .lab-stream-badge.is-stale { color: #9a6a22; background: #fff4de; }
 .mpu6050-lab .lab-version { color: #4d70d0; background: #eff3ff; }
+.mpu6050-lab .lab-export-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
 .mpu6050-lab .lab-empty { display: grid; min-height: 70px; place-content: center; gap: 4px; margin: 13px 0; border: 1px dashed #e2e9f0; border-radius: 7px; color: #8593a4; text-align: center; font-size: 9px; }
 .mpu6050-lab .lab-empty b { color: #53647a; font-size: 10px; }
 .mpu6050-lab .lab-reading-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 13px; }

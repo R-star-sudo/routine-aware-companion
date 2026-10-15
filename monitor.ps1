@@ -13,4 +13,13 @@ $pyExe = if (Test-Path "$rootDir\backend\.venv\Scripts\python.exe") {
     "python"
 }
 
+# Stop any orphaned live_monitor.py processes holding the COM port from earlier runs
+try {
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -eq "python.exe" -and $_.CommandLine -like "*live_monitor.py*" -and $_.ProcessId -ne $PID
+    } | ForEach-Object {
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+} catch {}
+
 & $pyExe "$rootDir\scripts\live_monitor.py" @Inputs
